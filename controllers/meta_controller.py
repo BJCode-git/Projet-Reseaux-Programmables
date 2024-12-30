@@ -2,12 +2,15 @@ import os
 import json
 
 from p4utils.utils.helper import load_topo
-from p4utils.utils.sswitch_thrift_API import SimpleSwitchThriftAPI
-from p4utils.mininetlib.network_API import NetworkAPI
+from p4utils.utils.topology import Topology, NetworkGraph
 
+# Import des contrôleurs
 from controllers.simple_router import SimpleRouter
 from controllers.simple_router_loss import SimpleRouterLoss
 from controllers.simple_router_stupid import SimpleRouterStupid
+#Import de la structure pour les statistiques
+from controllers.simple_router import Stats
+
 
 from time import sleep
 from threading import Thread
@@ -16,18 +19,19 @@ from collections import defaultdict
 from logging import getLogger, INFO, DEBUG, ERROR, WARNING, StreamHandler, Formatter
 
 class MetaController:
+	"""
+	Contrôleur principal qui gère les contrôleurs de chaque switch.
+	"""
 
 	def __init__(self, topology_file:str):
-		if not NetworkAPI().is_network_up():
-			raise Exception("Le réseau n'est pas démarré.")
 		if not os.path.exists(topology_file):
 			raise FileNotFoundError("Le fichier de topologie n'existe pas.")
 		
-		self.__topology		= load_topo(topology_file)
-		self.__controllers 	= {}
-		self.__registers	= {}
-		self.__running		= False
-		self.__supervisor_T = None
+		self.__topology		: NetworkGraph	= load_topo(topology_file)
+		self.__controllers					= defaultdict(SimpleRouter)
+		self.__registers					= defaultdict(dict)
+		self.__running 		: bool			= False
+		self.__supervisor_T : Thread		= Thread(target=self.__supervise_network_thread)
 	
 		# Initialisation du logger
 		self.__logger = getLogger("MetaController")
@@ -54,7 +58,6 @@ class MetaController:
 				case _:
 					self.__controllers[p4switch]	= SimpleRouter(p4switch, self.__topology)
 
-			self.__controllers[p4switch].run()			
 			self.__registers[p4switch]		= self.__controllers[p4switch].get_register_arrays()
 
 	def update_topology(self, topology_file:str):
@@ -72,7 +75,7 @@ class MetaController:
 	# Pas réellement utilisées ni adaptées, 
 	# chaque contrôleur initie et gère ses registres lui-même
 	
-	def reset_all_registers(self):
+	def __reset_all_registers(self):
 		"""
 		Réinitialise tous les registres de tous les contrôleurs.
 		"""
@@ -131,7 +134,7 @@ class MetaController:
 
 	##### Méthode pour gérer la supervision #####
 
-	def coordinate_probes(self):
+	def __coordinate_probes(self):
 		"""
 		Demande à chaque contrôleur d'envoyer des sondes.
 		"""
@@ -142,34 +145,20 @@ class MetaController:
 		"""
 		Récupère les données de supervision pour chaque switch.
 		"""
-		stats = {}
+		stats = defaultdict(Stats)
 		for switch_id, controller in self.__controllers.items():
 			stats[switch_id] = controller.collect_link_statistics()
 		return stats
 
-	def diagnose_anomalies(self, threshold=0.1):
+	def __diagnose_anomalies(self):
 		"""
 		Diagnostique les anomalies de pertes de paquets.
 		"""
-		stats = self.collect_all_statistics()
-		for switch_id, data in stats.items():
-			if data["loss_rate"] > threshold:
-				self.__logger.warning(f"Anomalie détectée sur {switch_id} : Taux de perte {data['loss_rate']:.2%}")
+		for controller in self.__controllers.values():
+			controller.diagnose_anomalies()
 
-	def get_linked_down(self):
-		"""
-		Récupère les liens qui sont down.
-		"""
-		linked_down = defaultdict(list)
-
-		for switch_id, controller in self.__controllers.items():
-			linked_down[switch_id] = controller.get_linked_down()
-			for link in linked_down[switch_id]:
-				self.__logger.warning(f"Le lien {link} est down sur le switch {switch_id}")
-
-		return linked_down
-
-	def supervise_network_links(self, measure_interval=10):
+  
+	def __supervise_network_thread(self, measure_interval=10):
 		"""
 		Supervise les liens de tous les commutateurs dans le réseau.
 		"""
@@ -177,32 +166,100 @@ class MetaController:
 		while self.__running:
 			# On attend un certain temps avant de refaire une mesure
 			sleep(measure_interval)
+   
+			# On réinitialise les registres des routeurs
+			# Et donc les statistiques associées
+			self.__reset_all_registers()
 
 			# On ordonne à chaque contrôleur d'envoyer des sondes
-			self.coordinate_probes()
+			self.__coordinate_probes()
 			
 			# On attend un peu pour que les sondes soient envoyées
 			# Et que les statistiques soient collectées
 			sleep(5)
-   
+
 			# On détecte les anomalies
-			self.diagnose_anomalies()
+			self.__diagnose_anomalies()
 
-			# On récupère les liens down
-			self.get_linked_down()
-   
-			# On réinitialise les statistiques
-			self.reset_all_registers()
+			# Eventuellement, on réagit aux anomalies
+			#self.__react_to_anomalies()
 
-	def run(self):
+	def __react_to_anomalies(self):
+		"""
+		Réagit aux anomalies détectées.
+		"""
+		# On récupère les statistiques
+		stats = self.collect_all_statistics()
+
+		# 2 phases pour réagir aux anomalies
+		# 1ere phase : 
+		# 	Pour chaque port qui ne marche pas, on identifie le lien associé,
+		# 	Et on le supprime de la topologie, ou on affecte un poids infini.
+		# 2eme phase :
+		# 	Pour chaque lien emprunté à la place d'un autre dans le chemin optimal,
+		# 	On augmente le poids du lien emprunté de 1.
+
+		# On copie la topologie pour la modifier
+		topology = self.__topology.copy()
+
+		# On récupère la liste des hôtes connectés aux interfaces des switchs
+		# Pour pouvoir identifier les liens
+		intfs = topology.get_intfs(fields="port")
+
+		# On parcourt les statistiques pour chaque switch
+		for switch_id in stats:
+
+			### 1ere phase ###
+			# Pour chaque port qui ne marche pas, on supprime le lien associé
+			for port in stats[switch_id].down_ports:
+				# On identifie le voisin associé au port
+				neighbour = None
+				for n, p in intfs.items():
+					if p == port:
+						neighbour = n
+						break
+				# On supprime le lien de la topologie
+				if neighbour is not None:
+					topology.remove_link(switch_id, neighbour)
+					self.__logger.info(f"Le lien entre {switch_id} et {neighbour} a été supprimé de la topologie.")
+		
+			### 2eme phase ###
+			# Pour chaque chemin emprunté à la place d'un autre dans le chemin optimal
+			for paths in stats[switch_id].wrong_paths :
+				optimal_path	= paths[0]
+				wrong_path		= paths[1]
+				min_size = min(len(optimal_path), len(wrong_path))
+    
+				# On regarde si les chemins sont différents
+				# Si c'est le cas, on augmente le poids des liens empruntés
+				for i in range(min_size):
+					if optimal_path[i] != wrong_path[i]:
+						# On récupère le poids du lien emprunté, ou 1 si le lien n'existe pas
+						weight = topology.get_edge_data(switch_id, wrong_path[i],{"weight":1})["weight"]
+						# On augmente le poids du lien emprunté de 1
+						weight += 1
+						# Si le lien n'existe pas, il est ajouté, sinon met à jour le poids
+						topology.add_edge(switch_id, wrong_path[i], weight=weight)
+
+				# On regarde si le chemin emprunté est plus long que le chemin optimal
+				# Si c'est le cas, on augmente le poids des liens empruntés
+				for i in range(min_size,len(wrong_path)):
+					weight = topology.get_edge_data(switch_id, wrong_path[i],{"weight":1})["weight"]
+					weight += 1
+					topology.add_edge(switch_id, wrong_path[i], weight=weight)
+					
+
+
+	def start_supervising(self):
 		"""
 		Lance la supervision des liens du réseau.
 		"""
 		self.__running = True
-		self.__supervisor_T = Thread(target=self.supervise_network_links)
+		if self.__supervisor_T is None:
+			self.__supervisor_T = Thread(target=self.__supervise_network_thread)
 		self.__supervisor_T.start()
 
-	def stop(self):
+	def stop_supervising(self):
 		"""
 		Arrête la supervision des liens du réseau.
 		"""

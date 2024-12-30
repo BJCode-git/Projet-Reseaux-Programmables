@@ -8,6 +8,7 @@ des meilleurs chemins et de l’installation des entrées pertinentes dans les t
 import os
 import json
 from collections import defaultdict
+from typing import Any
 
 ## Import des modules pour le routage ##
 import networkx as nx
@@ -20,12 +21,30 @@ from p4utils.utils.helper import load_topo
 from p4utils.utils.topology import Topology, NetworkGraph
 
 ## Import des modules de communication ##
-from scapy.all import sendp, Ether, IP
+from scapy.all import Ether, IP, sendp , Packet, Raw
 
-
+# Import pour les logs
 from logging import getLogger, INFO, DEBUG, ERROR, WARNING, StreamHandler, Formatter
 
 
+PROTOCOL_LINK_TEST_TRIGGER = 0x95
+PROTOCOL_PATH_TEST_TRIGGER = 0x98
+
+class Stats:
+	"""
+	Classe pour stocker les statistiques du contrôleur.
+	total_packets_lost : Nombre total de paquets perdus.
+	total_probe_packets_sent : Nombre total de paquets sondes envoyés.
+	total_probe_packets_returned : Nombre total de paquets sondes revenus.
+	down_ports : Liste des ports down.
+	wrong_paths : Liste de paires de chemins :
+		Avec le chemin optimal, et le chemin réellement emprunté.
+	"""
+	total_packets_lost:				int 								= 0
+	total_probe_packets_sent:		int 								= 0
+	total_probe_packets_returned:	int									= 0
+	down_ports:						list[int]							= []
+	wrong_paths:					list[tuple[list[str],list[str]]]	= []
 
 class SimpleRouter:
 	"""
@@ -33,14 +52,34 @@ class SimpleRouter:
 	Cet équipement est composé d’un plan de données P4,
 	mais également d’un plan de contrôle python en charge du calcul
 	des meilleurs chemins et de l’installation des entrées pertinentes dans les tables.
+	Liste des tables :
+	- ipv4_lpm : Table de routage. 
+		-> Actions : 
+			- ipv4_forward : Routage des paquets. 
+		- no_routing_action : Pas de routage. Ajout de statistiques.
+	- router_info : Table d'informations sur le routeur.
+		-> Actions : 
+			- set_router_info : Ajout des informations du routeur.
+	Liste des registres disponibles : 
+		- loss_rate : Taux de perte des paquets.
+		- total_packets_lost : Nombre total de paquets perdus.
+		- total_probe_packets_sent : Nombre total de paquets sondes envoyés.
+		- total_probe_packets_returned : Nombre total de paquets sondes revenus.
+		- active_ports : Liste des ports actifs.
+		- active_ports_size : Nombre de ports actifs.
 	"""
-	def __init__(self, 
+ 
+	def __init__(self,
 				name : str,
 				topology :str | NetworkGraph = "topology.json",
 				p4src : str = "p4src/simple_router.p4",
 				log_level = INFO):
 		"""
 		Initialise le contrôleur avec la topologie réseau.
+		_param name : str : Nom du switch.
+		_param topology : str | NetworkGraph : Graphe ou Chemin vers le fichier json pour charger la topologie réseau.
+		_param p4src : str : Chemin vers le fichier P4.
+		_param log_level : int : Niveau de log.
 		"""
 		if isinstance(topology,str) and not os.path.exists(topology):
 			raise FileNotFoundError(f"Le fichier de topologie n'existe pas au chemin spécifié : {topology}")
@@ -54,19 +93,23 @@ class SimpleRouter:
 
 		# Identifiant du switch
 		self.__name: str						= name
+  
 		# Chargement de la topologie
 		if isinstance(topology,str):
 			self.__topology: NetworkGraph		= load_topo(topology)
 		elif isinstance(topology,NetworkGraph):
 			self.__topology: NetworkGraph		= topology
+   
 		# Interface pour contrôler les équipements P4
 		self.__controller						= SimpleSwitchThriftAPI(self.topology.get_thrift_port(name))
+
 		# Table de routage
 		self.__routing_table:defaultdict[list]	= defaultdict(list)
+
 		## Supervision des liens et des chemins ##
-		# Table de liens reçus
-		self.__received_links:list[int]			= list(int)
-		# Table des chemins reçus 
+		# Table de liens fonctionnels
+		self.__links_up:list[int]				= list(int)
+		# Table des chemins empruntés par les sondes 
 		self.__received_paths:defaultdict[list]	= defaultdict(list)
   
 		## Variables des registres du contrôleur ##
@@ -94,17 +137,24 @@ class SimpleRouter:
 
 	def __compute_routes(self):
 		"""
-		Calcule les routes pour chaque switch de la topologie.
+		Calcule les plus courts chemins pour chaque destination de la topologie.
 		"""
-		# Récupération de la topologie
-		graph = self.__topology
-  
-		# Calcul des plus courts chemin depuis le switch actuel.
-		paths = nx.shortest_path(graph,source=self.__name)
-  
-		# On étend la table de routage avec les chemins
-		self.__routing_table.update(paths)
-  
+		# Pour chaque noeud de la topologie,
+		# On calcule le plus court chemin depuis le switch actuel
+		for dest in self.__topology.get_nodes():
+			# Si la destination est le switch actuel (on 2 noeuds identiques : source et destination)
+			if dest == self.__name:
+				path = [self.__name,self.__name]
+			else:
+				# Calcul du plus court chemin depuis le switch actuel
+				path		 = self.__topology.get_shortest_paths_between_nodes(self.__name,dest)
+				# La liste recu contient la liste des liens à emprunter, on va garder que les noms des switchs
+				path		 = [link[1] for link in path]
+			# On rajoute le switch actuel à la liste en début de chemin
+			path.insert(0,self.__name)
+			# On étend la table de routage avec les chemins
+			self.__routing_table[dest] = path
+			
 		# On log les routes calculées
 		self.__logger.debug(f"Table de routage calculée : ")
 		if self.__logger.isEnabledFor(DEBUG):
@@ -115,10 +165,15 @@ class SimpleRouter:
 		"""
 		Installe les prochains sauts pour chaque destination.
 		"""
-		# On récupère les hotes accessibles depuis le switch actuel
+		
+		# Pour chaque destination de la table de routage
 		for dest_name in self.__routing_table:
+			
+			# Si la destination est le switch actuel, on ne fait rien
+			if dest_name == self.__name:
+				self.__topology.get_hos
 
-			# On récupère le prochain saut
+			# On récupère le nom du prochain noeud
 			next_hop = self.__routing_table[dest_name][1]
 
 			# On vérifie que le prochain est bien un voisin
@@ -126,48 +181,83 @@ class SimpleRouter:
 				self.__logger.error(f"Le prochain saut {next_hop} n'est pas un voisin du switch {self.__name} !!")
 				raise Exception(f"Le prochain saut {next_hop} n'est pas un voisin du switch {self.__name}")
 
-			# On récupère l'ip du prochain saut
-			next_hop_ip = self.__topology.node_to_node_ip(next_hop,self.__name)
-			# On récupère le port de sortie
-			next_hop_port = self.__topology.node_to_node_port_num(self.__name,next_hop)
+			# On récupère le port de sortie du switch vers le prochain saut
+			next_hop_port = self.__topology.node_to_host_port_num(self.__name,next_hop)
 			# On récupère l'adresse mac du prochain saut
-			next_hop_mac = self.__topology.node_to_node_mac(next_hop,self.__name)
-			# On récupère l'ip du prochain saut
+			next_hop_mac = self.__topology.node_to_host_mac(next_hop,dest_name)
 
-			# On installe la règle vers le prochain saut
-			# table_name , action_name , match_fields , action_params
-			self.__controller.table_add("ipv4_lpm",[f"{dest_name}/32"],[str(next_hop_port)],str(next_hop_mac))
+			# Si le noeud de destination est un hôte :
+			if self.__topology.isHost(dest_name):
+				# On récupère l'ip de l'hôte de destination
+				host_ip = self.__topology.get_host_ip(dest_name)
+				next_hop_ip = self.__topology.node_to_node_interface_ip(self.__name,next_hop)
+			
+				# On installe la règle vers l'hôte
+				#  ipv4_lpm , ipv4_forward , ip_dst -> port , mac, next_hop_ip_src
+				self.__controller.table_add(
+											"ipv4_lpm",
+											"ipv4_forward" ,
+											[f"{host_ip}/24"],
+											[str(next_hop_port) ,str(next_hop_mac), str(next_hop_ip)])
 
+			# Maintenant, si le noeud de destination est un switch
+			else :
+				# On va ajouter l'ip de la destination sur l'interface finale
+
+				# On récupère l'ip de la destination sur l'interface finale
+				# Soit l'ip  de dest sur l'interface entre [dest-1] et [dest]
+
+				switch_ip	= self.__topology.node_to_node_interface_ip(dest_name,self.__routing_table[dest_name][-2])
+				next_hop_ip = self.__topology.node_to_node_interface_ip(self.__name,next_hop)
+				# On récupère l'ip du prochain saut
+
+				# On installe la règle vers le prochain saut
+				# On installe la règle vers l'hôte
+				#  ipv4_lpm , ipv4_forward , ip_dst -> port , mac, next_hop_ip
+				self.__controller.table_add("ipv4_lpm",
+											"ipv4_forward",
+											[f"{switch_ip}"],
+											[str(next_hop_port),str(next_hop_mac), str(next_hop_ip)], 
+											priority=1)
+	
 	def __install_multicast(self):
 		"""
 		Installe les règles de multicast.
+		Permet de broadcast les sondes de liens sur tous les ports du switch.
 		cf : https://github.com/nsg-ethz/p4-learning/blob/master/exercises/03-L2_Flooding/thrift/solution/switch_controller.py
 		"""
 		# On cherche à créer un groupe multicast unique pour l'ensemble des switchs
 		# Ce groupe a l'id 1, cela permet de broadcast à tous les switchs les sondes
 
-		# On récupère les ports 
-		interfaces_to_port = self.__topology.get_node_intfs(self.__name,fields="port")
+		# On récupère les ports du routeur
+		interfaces_to_port = self.__topology.get_node_intfs(fields="port")[self.__name]
 		# On envoie sur tous les ports
 		ports = [int(intf) for intf in interfaces_to_port.values()]
 		# On retire le port CPU de la liste des ports du groupe multicast
 		ports.remove(self.__topology.get_cpu_port_index(self.__name))
   
-		# On crée le groupe multicast d'id 1 sur tous les ports
-		self.__controller.mc_mgrp_create(1, ports)	
-
-	def __install_ip_and_mac(self):
+		# On crée le groupe multicast d'id 1
+		self.__controller.mc_mgrp_create(1)
+		# On ajoute les ports au noeud multicast
+		handle = self.__controller.mc_node_create(1, ports)
+		# On associe le noeud multicast au groupe multicast
+		self.__controller.mc_node_associate(1, handle)
+	
+	def __install_router_info(self):
 		"""
-		Installe l'adresse MAC, IP, et le port cpu du switch actuel.
+		Installe  le port cpu du switch dans le registre cpu_port,
+		Et installe les ip du switch dans la table router_info.
 		"""
 		# On récupère les adresses MAC et IP des switchs
-		switch_mac		= self.__topology.get_node_mac(self.__name)
-		switch_ip		= self.__topology.get_node_ip(self.__name)
-		switch_cpu_port	= self.__topology.get_cpu_port_index(self.__name)
-  
-		# On installe les informations du switch dans la table
-		self.__controller.table_add("router_info",["set_router_info"],[],[switch_mac,switch_ip,switch_cpu_port])
 
+		switch_cpu_port	 = self.__topology.get_cpu_port_index(self.__name)
+		self.write_register("cpu_port", switch_cpu_port, 0)
+
+		## On installe les informations du switch dans la table
+		for n in self.__topology.get_neighbors(self.__name):
+			switch_ip = self.__topology.node_to_node_interface_ip(self.__name,n)
+			ip = f"{switch_ip}/24"
+			self.__controller.table_add("router_info",["set_router_info"],[ip],[])
 
 	def __update_mininet(self):
 		"""
@@ -184,6 +274,7 @@ class SimpleRouter:
 	def update_topology(self, topology:str | NetworkGraph):
 		"""
 		Met à jour la topologie.
+		_param topology : str | NetworkGraph : Chemin vers le fichier json pour charger la topologie réseau, ou la topologie réseau.
 		"""
 		self.__logger.debug("Mise à jour de la topologie...")
   
@@ -198,25 +289,26 @@ class SimpleRouter:
   
 		# On réinitialise les tables, et l'état du contrôleur
 		self.reset()
-  
-		# On recalcule les routes, et on les installe
-		self.run()
-  
+
+		# On recalule les routes, 
+		# et on réinstalle toutes les entrées et les informations du switch
+		self.init_all()
+
 		self.__logger.debug("Topologie mise à jour avec succès.")
-  
- 
+
+
 	##### Méthodes pour gérer les registres #####
  
 	# Pour obtenir "total_packets_lost" par exemple, on fait :
 	# controller.register_read("total_packets_lost", 0)
 	# -> read_register("total_packets_lost", 0)
  
-	def read_register(self, register_name:str, index : int | None  = None):
+	def read_register(self, register_name:str, index : int | None  = None) -> Any | list[Any]:
 		"""
+		Lit la valeur d'un registre.
 		_param register_name : str : Nom du registre à lire.
 		_param index : int : Index du registre à lire.
-
-		Lit la valeur d'un registre. 
+		Si None, lit tout le tableau du registre.
 		"""
 
 		value = self.__controller.register_read(register_name, index)
@@ -300,7 +392,8 @@ class SimpleRouter:
 
 	def __update_all_registers(self):
 		"""
-		Lit les valeurs des registres du contrôleur.
+		Lit les valeurs des registres du contrôleur,
+		Et met à jour les attributs du contrôleur.
 		"""
 
 		self.__logger.debug("Lecture des registres...")
@@ -309,6 +402,7 @@ class SimpleRouter:
 		self.__total_packets_lost			= self.read_register("total_packets_lost", 0)
 		self.__total_probe_packets_sent		= self.read_register("total_probe_packets_sent", 0)
 		self.__total_probe_packets_returned	= self.read_register("total_probe_packets_returned", 0)
+		self.__links_up						= self.__controller.register_read("links_up", None)
 
 		self.__logger.debug("Registres lus avec succès.")
 
@@ -354,8 +448,8 @@ class SimpleRouter:
 		# On installe les règles de multicast
 		self.__install_multicast()
 		# On installe les informations du switch
-		self.__install_ip_and_mac()
-  
+		self.__install_router_info()
+
 		self.__logger.info("Routes installées avec succès.")
 
 	def reset(self):
@@ -366,27 +460,162 @@ class SimpleRouter:
   
   ##### Méthodes pour la supervision du contrôleur #####
   
-	def __send_links_probe_packet(self):
+   ### Méthodes pour l'envoi des sondes ###
+
+	def __send_probe_trigger_packet(self,protocol: int, dest:str | None = None):
 		"""
 		Envoie un paquet de sonde pour tester les liens voisins.
+		_param protocol : int : Protocole du paquet de sonde.
+		_param dest : str | None : Destination du paquet de sonde.
+		Doit être PROTOCOL_LINK_TEST_TRIGGER (0x95) ou PROTOCOL_PATH_TEST_TRIGGER (0x98).
 		"""
-		# On envoie un paquet de type probe sur le port CPU
-		self.__controller.
+		global PROTOCOL_LINK_TEST_TRIGGER, PROTOCOL_PATH_TEST_TRIGGER
+  
+		if protocol not in [PROTOCOL_LINK_TEST_TRIGGER, PROTOCOL_PATH_TEST_TRIGGER]:
+			raise ValueError(f"Le protocole {protocol} n'est pas supporté.")
+		
+		# On construit le paquet de sonde
+		src_mac	= self.__topology.get_nodes()[self.__name]["mac"]
+		if protocol == PROTOCOL_LINK_TEST_TRIGGER or dest is None:
+			# Adresse MAC de broadcast
+			dest_mac = "ff:ff:ff:ff:ff:ff"
+		else:
+			dest_mac= self.__topology.get_nodes()[dest]["mac"]
+  
+		src_ip	= self.__topology.get_nodes()[self.__name]["ip"]
+		dest_ip	= self.__topology.get_nodes()[dest]["ip"]
 	
-	def __send_paths_probe_packet(self):
-		"""
-		Envoie un paquet de sonde pour tester les chemins.
-		"""
-		# On envoie un paquet de type probe sur le port CPU
-		# Et ce, pour chaque destination de la table de routage
-		origin_ip = self.__topology.get_node_ip(self.__name)
-		for dest in self.__routing_table:
-			self.__controller.
+		probe_packet = Ether(	src=src_mac,
+								dest=dest_mac ) /IP(src=src_ip,
+									dst=dest_ip,
+									proto=protocol)
 	
+		# On récupère l'interface cpu et le port cpu
+		cpu_intf = self.__topology.get_cpu_port_intf(self.__name)
+		cpu_port = self.__topology.get_cpu_port_index(self.__name)
+
+		# On envoie le paquet de sonde
+		sendp(probe_packet, iface=cpu_intf, port=cpu_port)
+
 	def send_probes(self):
 		"""
 		Envoie des sondes sur les liens et les chemins.
 		"""
-		self.send_links_probe_packet()
-		self.send_paths_probe_packet()
+		self.__send_probe_trigger_packet(PROTOCOL_LINK_TEST_TRIGGER)
+
+		# On envoie des sondes de chemin vers tous les switchs
+		# En parallèle, on va écouter les réponses des sondes de chemin sur le port CPU
+		for dest in self.__routing_table:
+			# On ne s'intéresse pas aux hôtes, ou à soi-même
+			# on ne peut encapsuler une sonde retour vers un hôte
+			if self.__topology.isHost(dest) or dest == self.__name:
+				continue
+			self.__send_probe_trigger_packet(PROTOCOL_PATH_TEST_TRIGGER, dest)
+			self.__logger.debug(f"Envoi d'une sonde de chemin vers {dest}.")
 	
+	### Méthode pour la collecte des chemins empruntés par les sondes ###
+	
+	def recv_msg_cpu(self, pkt : Packet):
+		"""
+		Reçoit les messages sur le port CPU.
+		_param pkt : Packet : Paquet reçu.
+		"""
+		interface = pkt.sniffed_on
+		print(interface)
+		switch_name = interface.split("-")[0]
+		packet = Ether(raw(pkt))
+		if packet.type == 0x1234:
+			loss_header = LossHeader(packet.load)
+			batch_id = loss_header.batch_id >> 7
+			print(switch_name, batch_id)
+			self.check_sw_links(switch_name, batch_id)
+ 
+	### Méthodes pour le diagnostic des anomalies ###
+	def __diagnose_anomalies_links(self) -> list[int]:
+		"""
+		Diagnostique les anomalies sur les liens.
+		return : list[int] | None : Liste des ports down, ou None si pas d'anomalie.
+		"""
+		# On récupère la liste des ports connectés en théorie au switch 
+		ports = self.__topology.get_node_intfs(fields="port")[self.__name].copy()
+		# On enlève le port CPU et le port de loopback
+		ports.pop(self.__topology.get_cpu_port_intf(self.__name))
+		ports.pop("lo")
+		# On les convertit en entiers
+		ports = [int(port) for port in ports.values()]
+
+		# Met à jour les données links_up à partir du registre associé
+		self.__links_up = self.read_register("links_up", None)
+		# On liste les ports down (non présents dans la liste des liens up)
+		ports_down = [ports_down for ports_down in ports if ports_down not in self.__links_up]
+
+		if ports_down:
+			self.__logger.warning(f"Anomalie détectée sur les ports {ports_down} : Liens down.")
+		else:
+			self.__logger.debug("Pas d'anomalie détectée sur les liens.")
+		return ports_down
+
+	def __diagnose_anomalies_paths(self) -> list | None:
+		"""
+		Diagnostique les anomalies sur les chemins.
+		return : liste de pair contenant le chemins optimaux, et le chemin non optimal, rééllement emprunté.
+		"""
+		# On récupère les chemins non optimaux
+		not_optimal_path	= list[tuple[list[str],list[str]]]()
+		# Permet de stocker les correspondances entre les noms des switchs et les adresses IP
+		match_ip_sw_names	= defaultdict[str]
+
+		# On vient faire la correspondance entre les IP et les noms des switchs
+		for sw in self.__topology.get_nodes():
+			for intfs in self.__topology.get_interfaces(sw):
+				match_ip_sw_names[intfs["ip"]] = sw
+
+		# On parcourt  les chemins calculés
+		for dest in self.__routing_table:
+			# On ne s'intéresse pas aux hôtes, ou à soi-même
+			# on ne peut encapsuler une sonde retour vers un hôte
+			if self.__topology.isHost(dest) or dest == self.__name:
+				continue
+			# On récupère le chemin optimal
+			optimal_path = self.__routing_table[dest]
+			# On récupère le chemin reçu
+			received_ip_path = []
+			if dest in self.__received_paths:
+				received_ip_path = self.__received_paths[dest]
+			# On convertit les adresses IP en noms de switchs
+			received_path = [match_ip_sw_names[ip] for ip in received_ip_path]
+			# On compare les deux chemins
+			if optimal_path != received_path:
+				self.__logger.warning(f"Anomalie détectée sur le chemin vers {dest} : Chemin optimal {optimal_path}, chemin reçu {received_path}.")
+				not_optimal_path.append((optimal_path,received_path))
+		
+		return not_optimal_path
+
+	def diagnose_anomalies(self):
+		"""
+		Diagnostique les anomalies sur les liens et les chemins.
+		"""
+		stats = Stats()
+  
+		# On met à jour les statistiques du contrôleur à partir des registres
+		self.__update_all_registers()
+  
+		# On diagnostique les anomalies à partir des statistiques
+		stats.down_ports	= self.__diagnose_anomalies_links()
+		stats.wrong_paths	= self.__diagnose_anomalies_paths()
+
+		# On log les statistiques
+		self.__logger.info("Rapport de détection d'anomalies : ")
+		self.__logger.info(f"Nombre total de paquets perdus : {stats.total_packets_lost}")
+		self.__logger.info(f"Nombre total de paquets sondes revenus / envoyés : {stats.total_probe_packets_returned} / {stats.total_probe_packets_sent}")
+		if stats.down_ports:
+			self.__logger.warning(f"Ports down : {stats.down_ports}")
+		else:
+			self.__logger.info("Tous les liens sont fonctionnels.")
+		if stats.wrong_paths:
+			for paths in stats.wrong_paths:
+				self.__logger.warning(f"Chemin optimal : {paths[0]}, chemin réel : {paths[1]}")
+		else:
+			self.__logger.info("Pas de chemins non optimaux détectés.")
+		
+		return stats

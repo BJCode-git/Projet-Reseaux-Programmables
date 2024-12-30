@@ -7,7 +7,7 @@
 
 /** Définition des constantes **/
 #define MAX_HOPS 				16
-#define MAX_ROUTE_ENTRIES		1024
+#define MAX_ROUTE_ENTRIES		216
 #define MAX_PORTS_ENTRIES		16
 
 /** Définition des ethernet types **/
@@ -59,7 +59,7 @@ sur le paquet
 */
 header custom_route_t {
 	// Flag indiquant si c'est le dernier point de passage
-	bit<1>				last_header;
+	bit<8>		last_header;
 	// Adresse IP à prendre pour le prochain saut
 	ip4Addr_t	hop;
 }
@@ -92,7 +92,8 @@ header ipv4_t {
 
 struct metadata {
 	/* Va contenir les informations du routeur (i.e. mac, ip) */
-	macAddr_t 	router_mac;
+	//macAddr_t 	router_mac;
+	ip4Addr_t 	route_origin_ip;
 	ip4Addr_t 	router_ip;
 	Port_t		cpu_port;
 }
@@ -144,6 +145,9 @@ parser MyParser(packet_in packet,
 	state parse_custom_route {
 		// Extraction de l'en-tête custom_route
 		packet.extract(hdr.custom_route);
+
+		// On récupère l'ip du routeur d'origine du paquet pour la supervision des chemins
+		meta.route_origin_ip = hdr.custom_route.hop;
 
 		transition select(hdr.custom_route.last_header) {
 			// Si c'est le dernier header, on parse l'en-tête IPv4
@@ -200,6 +204,10 @@ control MyIngress(inout headers hdr,
 
 	/***** Définition des registres *****/
 	
+		// On doit définir un registre pour stocker le port du CPU
+		// Pour la supervision des chemins
+		register<Port_t>(1) cpu_port;
+
 		// On doit definir un registre loss_rate pour définir le taux de perte
 		// des paquets pour le simple_router_loss
 		register<bit<8>>(1)  loss_rate;
@@ -245,8 +253,11 @@ control MyIngress(inout headers hdr,
 	// Il s'agit des infos que le routeur envoie à ses voisins
 	// Dans les paquets de sonde
 	table router_info {
+		key = {
+			ipv4.dstAddr: exact;
+		}
 		actions {
-			set_router_info;
+			route_back_path_probe;
 			NoAction;
 		}
 		default_action : NoAction;
@@ -257,10 +268,15 @@ control MyIngress(inout headers hdr,
 	/***** Définition des actions *****/
 
 	/* Configuration du routeur */
-	action set_router_info(macAddr_t mac, ip4Addr_t ip, Port_t cpu_port) {
-		meta.router_mac	= mac;
-		meta.router_ip	= ip;
-		meta.cpu_port	= cpu_port;
+	action route_back_path_probe() {
+		// On transforme le type du paquet en paquet de sonde retour
+		hdr.ipv4.protocol = PROTOCOL_PATH_TEST_RETURN;
+		// Renvoyer le paquet à la source
+		hdr.ipv4.dstAddr = hdr.ipv4.srcAddr;
+	}
+
+	action set_cpu_info() {
+		meta.cpu_port = cpu_port.read(0);
 	}
 
 	/** Actions pour le routage **/
@@ -280,7 +296,9 @@ control MyIngress(inout headers hdr,
 	}
 
 	// On définit l'action pour le routage classique ipv4_forward
-	action ipv4_forward(macAddr_t dstAddr, egressSpec_t port) {
+	// qui va router le paquet sur le port de sortie
+	//met à jour les adresses MAC et IP de provenance et de destination du paquet
+	action ipv4_forward(egressSpec_t port, macAddr_t dstAddr, ip4Addr_t ip_out) {
 
 		// On décrémente le TTL
 		header.ipv4.ttl 		= header.ipv4.ttl - 1;
@@ -294,16 +312,19 @@ control MyIngress(inout headers hdr,
 		header.ethernet.dstAddr = dstAddr;
 
 		// On définit le port de sortie
-		// Fourni par la table de routage
+		// Egalement fourni par la table de routage
 		standard_metadata.egress_spec = port;
+
+		// Définit l'ip de l'interface de sortie du paquet
+		meta.router_ip = ip_out;
 	}
 
 	// On définit l'action pour le broadcast des paquets de sonde sur tous les ports
 	action broadcast(){
 		standard_metadata.mcast_grp = 1;
 		hdr.broadcast.setValid();
-		hdr.broadcast.id	= 1;
-		hdr.broadcast.type	= 0X10;
+		hdr.broadcast.id			= 1;
+		hdr.broadcast.type			= 0X10;
 	}
 
 	/** Actions sur les registres **/
@@ -350,7 +371,7 @@ control MyIngress(inout headers hdr,
 
 		// On récupère l'adresse MAC et l'adresse IP du routeur
 		// Pour la supervision des liens directs avec les voisins
-		router_info.apply();
+		set_cpu_info();
 
 		// on regarde si le paquet est un paquet de sonde
 		if(	hdr.ipv4.isValid() && 
@@ -405,14 +426,16 @@ control MyIngress(inout headers hdr,
 					// On transforme le type du paquet en paquet de sonde aller
 					hdr.ipv4.protocol = PROTOCOL_PATH_TEST_SENT;
 
+					// On route le paquet 
+					ipv4_lpm.apply();
+
 					// On push l'adresse ip du routeur de départ
 					// Pour indiquer le passage par le routeur
 					hdr.custom_route.push_front(1);
 					hdr.custom_route[0].last_header = 1;
 					hdr.custom_route[0].hop = meta.router_ip;
+					hdr.custom_route[0].setValid();
 					
-					// On route le paquet
-					ipv4_lpm.apply();
 
 					// On incrémente le nombre de paquets de sonde envoyés
 					increment_probe_packets_sent();
@@ -420,37 +443,41 @@ control MyIngress(inout headers hdr,
 				// Si on reçoit un paquet sonde de routage aller
 				PROTOCOL_PATH_TEST_SENT :
 
+					// On regarde si l'adresse de destination est celle du routeur
+					// On regarde ça dans la table router_info
+
+					// On regarde si le paquet est destiné au routeur
+					router_info.apply();
+
+					// Routage du paquet
+					ipv4_lpm.apply();
+
 					// On push l'adresse ip du routeur actuel
 					// Pour indiquer le passage par le routeur
 					hdr.custom_route.push_front(1);
 					hdr.custom_route[0].last_header = 0;
-					hdr.custom_route[0].hop = meta.router_ip;
-
-					// On regarde si le paquet est destiné au routeur
-					if(hdr.ipv4.dstAddr == meta.router_ip) {
-						// Si oui, on va renvoyer le paquet à la source,
-						// En tant que paquet de sonde retour
-						hdr.ipv4.protocol = PROTOCOL_PATH_TEST_RETURN;
-						// Renvoyer le paquet à la source
-						ipv4.dstAddr = hdr.ipv4.srcAddr;
-						// Routage du paquet
-						ipv4_lpm.apply();
-					}
+					hdr.custom_route[0].hop 		= meta.router_ip;
+					hdr.custom_route[0].setValid();
 
 				
 				// Si on reçoit un paquet sonde de chemin retour
 				PROTOCOL_PATH_TEST_RETURN :
 
-					// On regarde s'il nous est destiné
-					if(hdr.ipv4.dstAddr == meta.router_ip) {
-						// On envoie le paquet au contrôleur
+					
+					// On regarde si le paquet nous est destiné
+					// i.e, le paquet arrive sur notre adresse IP source
+					// En regardant s'il y a un hit dans la table router_info
+					if( router_info.apply().hit ) {
+
+						// Si le paquet est destiné au routeur
+						// On renvoie le paquet au contrôleur via le port CPU
 						standard_metadata.egress_spec = meta.cpu_port;
 
 						// On incrémente le nombre de paquets de sonde retournés
 						increment_probe_packets_returned();
 					}
 
-					// Sinon, on route le paquet
+					// Sinon, on route le paquet vers sa destination
 					else {
 						ipv4_lpm.apply();
 					}
