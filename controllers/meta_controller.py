@@ -322,5 +322,15 @@ class MetaController:
 		Arrête la supervision des liens du réseau.
 		"""
 		self.__running = False
+		# On arrête le sniffing au besoin
+		self.__stop_sniffing_on_cpu_ports()
 		self.__supervisor_T.join(timeout=10)
 		self.__supervisor_T = None
+  
+
+
+if __name__ == "__main__":
+	mc = MetaController("topology.json")
+	mc.start_supervising()
+	sleep(120)
+	mc.stop_supervising()
