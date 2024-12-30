@@ -10,10 +10,6 @@ import json
 from collections import defaultdict
 from typing import Any
 
-## Import des modules pour le routage ##
-import networkx as nx
-from networkx.algorithms import all_pairs_dijkstra
-
 ## Import des modules P4utils ##
 from p4utils.utils.sswitch_thrift_API import SimpleSwitchThriftAPI
 from p4utils.utils.compiler import P4C
@@ -21,14 +17,49 @@ from p4utils.utils.helper import load_topo
 from p4utils.utils.topology import Topology, NetworkGraph
 
 ## Import des modules de communication ##
-from scapy.all import Ether, IP, sendp , Packet, Raw
+from scapy.all import Ether, IP, sendp , Packet, raw, BitField, FieldListField, sniff
+from ipaddress import IPv4Address
+
+# Import pour les threads
+from threading import Thread
 
 # Import pour les logs
 from logging import getLogger, INFO, DEBUG, ERROR, WARNING, StreamHandler, Formatter
 
 
-PROTOCOL_LINK_TEST_TRIGGER = 0x95
-PROTOCOL_PATH_TEST_TRIGGER = 0x98
+PROTOCOL_LINK_TEST_TRIGGER	= 0x95
+PROTOCOL_PATH_TEST_TRIGGER	= 0x98
+PROTOCOL_PATH_TEST_RETURN	= 0x9A
+
+class CustomRoute(Packet):
+	"""
+	En-tête custom_route_t pour enregistrer les sauts intermédiaires.
+	"""
+	name = "CustomRoute"
+	fields_desc = [
+		BitField("last_header", 0, 8),  # Flag indiquant le dernier saut
+		BitField("hop", 0, 32),        # Adresse IP du routeur
+	]
+
+class ProbeReturnHeader(Packet):
+	"""
+	Header d'un paquet retourné au contrôleur avec une liste de routeurs traversés.
+	"""
+	name = "ProbeReturnHeader"
+	fields_desc = [
+		FieldListField("custom_route", [], CustomRoute, length_from=lambda pkt: pkt.ihl)
+	]
+
+
+## Construire un paquet de test
+#packet = (
+#    Ether(dst="ff:ff:ff:ff:ff:ff", src="00:11:22:33:44:55", type=0x0800) /
+#    IP(src="10.0.0.1", dst="10.0.0.2", proto=0x9A) /
+#    ProbeReturnHeader(custom_route=[
+#        CustomRoute(last_header=0, hop=0xC0A80101),  # 192.168.1.1
+#        CustomRoute(last_header=1, hop=0xC0A80102),  # 192.168.1.2
+#    ])
+#) 
 
 class Stats:
 	"""
@@ -99,19 +130,21 @@ class SimpleRouter:
 			self.__topology: NetworkGraph		= load_topo(topology)
 		elif isinstance(topology,NetworkGraph):
 			self.__topology: NetworkGraph		= topology
-   
+
 		# Interface pour contrôler les équipements P4
 		self.__controller						= SimpleSwitchThriftAPI(self.topology.get_thrift_port(name))
-
 		# Table de routage
 		self.__routing_table:defaultdict[list]	= defaultdict(list)
-
 		## Supervision des liens et des chemins ##
 		# Table de liens fonctionnels
 		self.__links_up:list[int]				= list(int)
 		# Table des chemins empruntés par les sondes 
 		self.__received_paths:defaultdict[list]	= defaultdict(list)
   
+		# Thread pour la capture des paquest sur le port CPU
+		self.__sniff_running					= False
+		self.__sniff_thread						= None
+
 		## Variables des registres du contrôleur ##
   
 		# Définition du taux de perte à 0 par défaut
@@ -513,24 +546,113 @@ class SimpleRouter:
 			self.__send_probe_trigger_packet(PROTOCOL_PATH_TEST_TRIGGER, dest)
 			self.__logger.debug(f"Envoi d'une sonde de chemin vers {dest}.")
 	
-	### Méthode pour la collecte des chemins empruntés par les sondes ###
+	### Méthodes pour la collecte des chemins empruntés par les sondes ###
 	
-	def recv_msg_cpu(self, pkt : Packet):
+	def recv_msg_cpu(self,packet: Packet):
 		"""
-		Reçoit les messages sur le port CPU.
-		_param pkt : Packet : Paquet reçu.
+		Reçoit et parse les messages sur le port CPU.
+		Extrait la liste des routeurs traversés.
+		Si on a pu extraire la liste, on l'ajoute dans la table des chemins reçus.
+
+		:param packet: Paquet brut capturé.
 		"""
-		interface = pkt.sniffed_on
-		print(interface)
-		switch_name = interface.split("-")[0]
-		packet = Ether(raw(pkt))
-		if packet.type == 0x1234:
-			loss_header = LossHeader(packet.load)
-			batch_id = loss_header.batch_id >> 7
-			print(switch_name, batch_id)
-			self.check_sw_links(switch_name, batch_id)
- 
+		global PROTOCOL_PATH_TEST_RETURN
+  
+		try:
+			hops		 = []
+   
+			# On vérifie que c'est un paquet Ethernet + IPv4
+			if Ether in packet and IP in packet:
+				ip	= packet[IP]
+
+				# On s'assure que le protocole correspond à PROTOCOL_PATH_TEST_RETURN
+				if ip.proto == PROTOCOL_PATH_TEST_RETURN:
+
+					# On regarde si le paquet contient une en-tête custom_route
+					if ProbeReturnHeader in packet:
+						probe_header = packet[ProbeReturnHeader]
+						
+						# On parcourt les en-têtes custom_route
+						for route in probe_header.custom_route:
+							# Avec l'encapsulation, les adresses ip sont 
+							# empilées dans l'ordre inverse de passage
+							ip = str(IPv4Address(route.hop))
+							hops.prepend(ip)
+
+							if route.last_header == 1:
+								break
+			else:
+				# Affiche le paquet reçu
+				self.__logger.error("Paquet reçu non conforme.")
+				self.__logger.error(f"Paquet reçu : {packet.summary()}")
+				
+			if len(hops) > 0:
+				# On récupère l'adresse IP de la destination
+				dest_ip = hops[-1]
+				# On met à jour la table des chemins reçus
+				self.__received_paths[dest_ip] = hops
+
+
+		except Exception as e:
+			self.__logger.error(f"Erreur lors du parsing du paquet : {e}")
+
+	def sniff_cpu(self,start_sniffing:bool = True):
+		"""
+		Permet de sniffer les paquets sur le port CPU.
+		"""
+		# On vérifie si le sniffing est déjà en cours
+		# Auquel cas, on ne fait rien
+		if self.__sniff_running and start_sniffing:
+
+			self.__logger.warning("Le sniffing est déjà en cours.")
+			return
+		# On vérifie si le sniffing est déjà arrêté
+		# Auquel cas, on ne fait rien
+		elif not self.__sniff_running and not start_sniffing:
+
+			self.__logger.warning("Le sniffing est déjà arrêté.")
+			return
+
+		# Sinon, on va démarrer ou arrêter le sniffing
+		else:
+			# Si on veut démarrer le sniffing
+			if start_sniffing:
+				self.__logger.debug("Démarrage du sniffing...")
+				# Définir le nombre de paquets à capturer maximum
+				nb_packet_max 	= len(self.__routing_table)
+				# On définit la fonction de callback pour le traitement des paquets
+				rcv_packet		= lambda pkt : self.recv_msg_cpu(pkt)
+				# On definit la fonction de stop
+				stop_sniff		= lambda : not self.__sniff_running
+				# On récupère l'interface CPU
+				cpu_intf		= self.__topology.get_cpu_port_intf(self.__name)
+				args			= {
+									"iface":cpu_intf, 
+									"prn":rcv_packet, 
+									"stop_filter":stop_sniff, 
+									"count":nb_packet_max
+								}
+				# On lance le sniffing dans un thread
+				self.__sniff_thread = Thread(target=sniff,args=args)
+				self.__sniff_thread.start()
+				self.__sniff_running = True
+
+			elif not start_sniffing:
+				self.__logger.debug("Arrêt du sniffing...")
+				# On arrête le sniffing
+				self.__sniff_running = False
+				self.__sniff_thread.join(timeout=3)
+				self.__sniff_thread = None
+
+	def get_cpu_interface(self):
+		"""
+		Récupère l'interface CPU du switch.
+		"""
+		return self.__topology.get_cpu_port_intf(self.__name)
+
 	### Méthodes pour le diagnostic des anomalies ###
+	
+ 
 	def __diagnose_anomalies_links(self) -> list[int]:
 		"""
 		Diagnostique les anomalies sur les liens.
@@ -619,3 +741,16 @@ class SimpleRouter:
 			self.__logger.info("Pas de chemins non optimaux détectés.")
 		
 		return stats
+
+	def get_statistics(self) -> Stats:
+		"""
+		Récupère les statistiques du contrôleur.
+		__return: Stats : Statistiques du contrôleur.
+		"""
+		return Stats(
+			total_packets_lost				= self.__total_packets_lost,
+			total_probe_packets_sent		= self.__total_probe_packets_sent,
+			total_probe_packets_returned	= self.__total_probe_packets_returned,
+			down_ports						= self.__links_up,
+			wrong_paths						= self.__received_paths
+		)

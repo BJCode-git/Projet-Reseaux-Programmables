@@ -15,6 +15,8 @@ from controllers.simple_router import Stats
 from time import sleep
 from threading import Thread
 from collections import defaultdict
+from typing import Callable
+from scapy.all import Packet
 
 from logging import getLogger, INFO, DEBUG, ERROR, WARNING, StreamHandler, Formatter
 
@@ -32,6 +34,8 @@ class MetaController:
 		self.__registers					= defaultdict(dict)
 		self.__running 		: bool			= False
 		self.__supervisor_T : Thread		= Thread(target=self.__supervise_network_thread)
+		self.__running_sniff				= None
+		self.__sniffing_T					= None
 	
 		# Initialisation du logger
 		self.__logger = getLogger("MetaController")
@@ -134,6 +138,45 @@ class MetaController:
 
 	##### Méthode pour gérer la supervision #####
 
+	def __sniff_on_cpu_ports(self):
+		"""
+		Lance le sniffing sur les ports cpu des switchs.
+		"""
+		if self.__running_sniff:
+			self.__logger.warning("Le sniffing est déjà en cours.")
+			return
+		else:
+			match_sw_cpu_intf = dict(str)
+			for sw in self.__controllers:
+				match_sw_cpu_intf[sw] = self.__topology.get_cpu_port_intf(sw)
+			
+			pkt_callback : Callable[[Packet],None] = lambda pkt: self.__controllers[match_sw_cpu_intf[pkt.sniffed_on]].process_packet(pkt)
+				
+			stop_condition = lambda: not self.__running_sniff
+			max_packets = len(self.__controllers) * len(self.__controllers)
+
+			args = {
+				"iface"		:	match_sw_cpu_intf.values(),
+				"prn"		:	pkt_callback,
+				"stop_filter":	stop_condition,
+				"count"		:	max_packets
+
+			}
+			self.__sniffing_T = Thread(target=self.__sniffing_on_cpu_ports, args=args)
+			self.__sniffing_T.start()
+			self.__running_sniff = True
+
+	def __stop_sniffing_on_cpu_ports(self):
+		"""
+		Arrête le sniffing sur les ports cpu des switchs.
+		"""
+		if self.__running_sniff:
+			self.__running_sniff = False
+			self.__sniffing_T.join(timeout=5)
+			self.__sniffing_T = None
+		else:
+			self.__logger.warning("_stop_sniffing : Le sniffing n'est pas en cours.")
+
 	def __coordinate_probes(self):
 		"""
 		Demande à chaque contrôleur d'envoyer des sondes.
@@ -141,55 +184,30 @@ class MetaController:
 		for controller in self.__controllers.values():
 			controller.send_probe_packets()
 
-	def collect_all_statistics(self):
+	def __collect_all_statistics(self):
 		"""
 		Récupère les données de supervision pour chaque switch.
 		"""
 		stats = defaultdict(Stats)
 		for switch_id, controller in self.__controllers.items():
-			stats[switch_id] = controller.collect_link_statistics()
+			stats[switch_id] = controller.get_statistics()
 		return stats
 
 	def __diagnose_anomalies(self):
 		"""
 		Diagnostique les anomalies de pertes de paquets.
+		Chaque contrôleur doit avoir une méthode diagnose_anomalies.
+		Les contrôleurs procèdent individuellement à la détection de leurs propres anomalies.
 		"""
 		for controller in self.__controllers.values():
 			controller.diagnose_anomalies()
-
-  
-	def __supervise_network_thread(self, measure_interval=10):
-		"""
-		Supervise les liens de tous les commutateurs dans le réseau.
-		"""
-  
-		while self.__running:
-			# On attend un certain temps avant de refaire une mesure
-			sleep(measure_interval)
-   
-			# On réinitialise les registres des routeurs
-			# Et donc les statistiques associées
-			self.__reset_all_registers()
-
-			# On ordonne à chaque contrôleur d'envoyer des sondes
-			self.__coordinate_probes()
-			
-			# On attend un peu pour que les sondes soient envoyées
-			# Et que les statistiques soient collectées
-			sleep(5)
-
-			# On détecte les anomalies
-			self.__diagnose_anomalies()
-
-			# Eventuellement, on réagit aux anomalies
-			#self.__react_to_anomalies()
 
 	def __react_to_anomalies(self):
 		"""
 		Réagit aux anomalies détectées.
 		"""
 		# On récupère les statistiques
-		stats = self.collect_all_statistics()
+		stats = self.__collect_all_statistics()
 
 		# 2 phases pour réagir aux anomalies
 		# 1ere phase : 
@@ -247,7 +265,47 @@ class MetaController:
 					weight = topology.get_edge_data(switch_id, wrong_path[i],{"weight":1})["weight"]
 					weight += 1
 					topology.add_edge(switch_id, wrong_path[i], weight=weight)
-					
+
+	def __supervise_network_thread(self, measure_interval=10):
+		"""
+		Supervise les liens de tous les commutateurs dans le réseau.
+		"""
+  
+		while self.__running:
+			# On attend un certain temps avant de refaire une mesure
+			sleep(measure_interval)
+   
+			# On réinitialise les registres des routeurs
+			# Et donc les statistiques associées
+			self.__reset_all_registers()
+
+			# On va ordonner à chaque contrôleur d'envoyer des sondes,
+			# Au préalable, on va lancer le sniffing sur les ports cpu
+			# Pour récupérer les chemins empruntés
+   
+			# On lance le sniffing sur les ports cpu
+			# 2 facçons de faire :
+			# - Soit on ordonne à chaque contrôleur de lancer le sniffing 
+			#		(chaque contrôleur a une méthode et démarre un nouveau thread)
+			# - Soit on le fait ici, et on commute les paquets vers le bon contrôleur
+			# On va choisir la 2eme option
+
+			self.__sniff_on_cpu_ports()
+
+			# On envoie donc les sondes
+			self.__coordinate_probes()
+			
+			# On attend un peu pour que les sondes soient envoyées
+			# Et que les statistiques soient collectées
+			sleep(5)
+   
+			self.__stop_sniffing_on_cpu_ports()
+
+			# On détecte les anomalies
+			self.__diagnose_anomalies()
+
+			# Eventuellement, on réagit aux anomalies
+			#self.__react_to_anomalies()
 
 
 	def start_supervising(self):
