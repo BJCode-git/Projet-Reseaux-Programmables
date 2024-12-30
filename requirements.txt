@@ -2,5 +2,4 @@ p4runtime
 scapy
 networkx
 matplotlib
-logging
 p4utils
