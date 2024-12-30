@@ -2,4 +2,3 @@ p4runtime
 scapy
 networkx
 matplotlib
-p4utils
