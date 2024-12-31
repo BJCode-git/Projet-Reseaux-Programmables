@@ -1,0 +1,92 @@
+This is XeTeX, Version 3.141592653-2.6-0.999995 (TeX Live 2023) (preloaded format=xelatex 2023.12.25)  31 DEC 2024 03:49
+entering extended mode
+ \write18 enabled.
+ file:line:error style messages enabled.
+ %&-line parsing enabled.
+**/home/julien/Cours/Cours3A/Reseaux_Programmables/Projet/rapport/Rapport-BRELOT-Julien.tex
+(/home/julien/Cours/Cours3A/Reseaux_Programmables/Projet/rapport/Rapport-BRELOT-Julien.tex
+LaTeX2e <2023-11-01>
+L3 programming layer <2023-12-11>
+(/home/julien/.TinyTeX/texmf-dist/tex/latex/base/report.cls
+Document Class: report 2023/05/17 v1.4n Standard LaTeX document class
+(/home/julien/.TinyTeX/texmf-dist/tex/latex/base/size12.clo
+File: size12.clo 2023/05/17 v1.4n Standard LaTeX file (size option)
+)
+\c@part=\count183
+\c@chapter=\count184
+\c@section=\count185
+\c@subsection=\count186
+\c@subsubsection=\count187
+\c@paragraph=\count188
+\c@subparagraph=\count189
+\c@figure=\count190
+\c@table=\count191
+\abovecaptionskip=\skip48
+\belowcaptionskip=\skip49
+\bibindent=\dimen140
+) (/home/julien/.TinyTeX/texmf-dist/tex/latex/base/inputenc.sty
+Package: inputenc 2021/02/14 v1.3d Input encoding file
+\inpenc@prehook=\toks17
+\inpenc@posthook=\toks18
+
+
+Package inputenc Warning: inputenc package ignored with utf8 based engines.
+
+) (/home/julien/.TinyTeX/texmf-dist/tex/latex/base/fontenc.sty
+Package: fontenc 2021/04/29 v2.0v Standard LaTeX package
+LaTeX Font Info:    Trying to load font information for T1+lmr on input line 112.
+ (/home/julien/.TinyTeX/texmf-dist/tex/latex/lm/t1lmr.fd
+File: t1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)) (/home/julien/.TinyTeX/texmf-dist/tex/generic/babel/babel.sty
+Package: babel 2023/12/10 v3.99 The Babel package
+\babel@savecnt=\count192
+\U@D=\dimen141
+\l@unhyphenated=\language5
+ (/home/julien/.TinyTeX/texmf-dist/tex/generic/babel/xebabel.def)
+\bbl@readstream=\read2
+\bbl@dirlevel=\count193
+
+
+/home/julien/.TinyTeX/texmf-dist/tex/generic/babel/babel.sty:4283: Package babel Error: Unknown option 'french'. Either you misspelled it
+(babel)                or the language definition file french.ldf was not found.
+
+See the babel package documentation for explanation.
+Type  H <return>  for immediate help.
+ ...                                              
+                                                  
+l.4283 \ProcessOptions*
+                       
+Valid options are, among others: shorthands=, KeepShorthandsActive,
+activeacute, activegrave, noconfigs, safe=, main=, math=
+headfoot=, strings=, config=, hyphenmap=, or a language name.
+
+Package babel Info: You haven't specified a language as a class or package
+(babel)             option. I'll load 'nil'. Reported on input line 4334.
+(/home/julien/.TinyTeX/texmf-dist/tex/generic/babel/nil.ldf
+Language: nil 2023/12/10 v3.99 Nil language
+\l@nil=\language6
+)) (./materialDesign.sty
+
+! LaTeX Error: File `tikz.sty' not found.
+
+Type X to quit or <RETURN> to proceed,
+or enter new name. (Default extension: sty)
+
+Enter file name: 
+./materialDesign.sty:3: Emergency stop.
+<read *> 
+         
+l.3 \RequirePackage
+                   {xcolor}^^M
+*** (cannot \read from terminal in nonstop modes)
+
+ 
+Here is how much of TeX's memory you used:
+ 1560 strings out of 476831
+ 25145 string characters out of 5804429
+ 1917106 words of memory out of 5000000
+ 23584 multiletter control sequences out of 15000+600000
+ 561076 words of font info for 38 fonts, out of 8000000 for 9000
+ 14 hyphenation exceptions out of 8191
+ 38i,0n,48p,316b,92s stack positions out of 10000i,1000n,20000p,200000b,200000s
+No pages of output.

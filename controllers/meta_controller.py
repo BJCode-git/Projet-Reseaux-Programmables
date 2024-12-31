@@ -1,8 +1,14 @@
 import os
-import json
+from time import sleep
+from threading import Thread
+
+from collections import defaultdict
+from typing import Callable
+
+from scapy.all import Packet, sniff
 
 from p4utils.utils.helper import load_topo
-from p4utils.utils.topology import Topology, NetworkGraph
+from p4utils.utils.topology import NetworkGraph # , Topology
 
 # Import des contrôleurs
 from controllers.simple_router import SimpleRouter
@@ -12,13 +18,9 @@ from controllers.simple_router_stupid import SimpleRouterStupid
 from controllers.simple_router import Stats
 
 
-from time import sleep
-from threading import Thread
-from collections import defaultdict
-from typing import Callable
-from scapy.all import Packet
 
-from logging import getLogger, INFO, DEBUG, ERROR, WARNING, StreamHandler, Formatter
+
+from logging import getLogger, INFO, StreamHandler, Formatter
 
 class MetaController:
 	"""
@@ -28,7 +30,7 @@ class MetaController:
 	def __init__(self, topology_file:str):
 		if not os.path.exists(topology_file):
 			raise FileNotFoundError("Le fichier de topologie n'existe pas.")
-		
+
 		self.__topology		: NetworkGraph	= load_topo(topology_file)
 		self.__controllers					= defaultdict(SimpleRouter)
 		self.__registers					= defaultdict(dict)
@@ -36,22 +38,22 @@ class MetaController:
 		self.__supervisor_T : Thread		= Thread(target=self.__supervise_network_thread)
 		self.__running_sniff				= None
 		self.__sniffing_T					= None
-	
+
 		# Initialisation du logger
 		self.__logger = getLogger("MetaController")
 		self.__logger.setLevel(INFO)
 		handler = StreamHandler()
 		handler.setFormatter(Formatter("[%(levelname)s] %(name)s : %(message)s"))
 		self.__logger.addHandler(handler)
-  
-		self.__init_controllers()	
+
+		self.__init_controllers()
 
 	def __init_controllers(self):
 		"""
 		Initialise les contrôleurs et leurs registres pour chaque switch de la topologie.
 		"""
 		for p4switch in self.__topology.get_p4switches():
-			
+
 			# On regarde si le switch est un routeur simple à l'attribut "type"
 			switch_type = p4switch.get("type", "simple_router")
 			match switch_type:
@@ -70,15 +72,15 @@ class MetaController:
 		"""
 		if not os.path.exists(topology_file):
 			raise FileNotFoundError(f"Le fichier de topologie n'existe pas au chemin spécifié : {topology_file}")
-		
-		self.__topology = self.load_topology(topology_file)
+
+		self.__topology = load_topo(topology_file)
 		for _,controller in self.__controllers.items():
-			controller.update_topology(self.topology)
+			controller.update_topology(self.__topology)
 
 	##### Méthode pour gérer les registres #####
-	# Pas réellement utilisées ni adaptées, 
+	# Pas réellement utilisées ni adaptées,
 	# chaque contrôleur initie et gère ses registres lui-même
-	
+
 	def __reset_all_registers(self):
 		"""
 		Réinitialise tous les registres de tous les contrôleurs.
@@ -92,9 +94,9 @@ class MetaController:
 		"""
 		value = None
 		try:
-  
+
 			value =self.__controllers[switch_id].read_register(register_name)
-		
+
 		except KeyError:
 			self.__logger.error(f"Le switch {switch_id} n'existe pas.")
 		except Exception as e:
@@ -149,9 +151,9 @@ class MetaController:
 			match_sw_cpu_intf = dict(str)
 			for sw in self.__controllers:
 				match_sw_cpu_intf[sw] = self.__topology.get_cpu_port_intf(sw)
-			
+
 			pkt_callback : Callable[[Packet],None] = lambda pkt: self.__controllers[match_sw_cpu_intf[pkt.sniffed_on]].process_packet(pkt)
-				
+
 			stop_condition = lambda: not self.__running_sniff
 			max_packets = len(self.__controllers) * len(self.__controllers)
 
@@ -162,7 +164,7 @@ class MetaController:
 				"count"		:	max_packets
 
 			}
-			self.__sniffing_T = Thread(target=self.__sniffing_on_cpu_ports, args=args)
+			self.__sniffing_T = Thread(target=sniff, args=args)
 			self.__sniffing_T.start()
 			self.__running_sniff = True
 
@@ -210,7 +212,7 @@ class MetaController:
 		stats = self.__collect_all_statistics()
 
 		# 2 phases pour réagir aux anomalies
-		# 1ere phase : 
+		# 1ere phase :
 		# 	Pour chaque port qui ne marche pas, on identifie le lien associé,
 		# 	Et on le supprime de la topologie, ou on affecte un poids infini.
 		# 2eme phase :
@@ -240,14 +242,14 @@ class MetaController:
 				if neighbour is not None:
 					topology.remove_link(switch_id, neighbour)
 					self.__logger.info(f"Le lien entre {switch_id} et {neighbour} a été supprimé de la topologie.")
-		
+
 			### 2eme phase ###
 			# Pour chaque chemin emprunté à la place d'un autre dans le chemin optimal
 			for paths in stats[switch_id].wrong_paths :
 				optimal_path	= paths[0]
 				wrong_path		= paths[1]
 				min_size = min(len(optimal_path), len(wrong_path))
-    
+
 				# On regarde si les chemins sont différents
 				# Si c'est le cas, on augmente le poids des liens empruntés
 				for i in range(min_size):
@@ -270,11 +272,11 @@ class MetaController:
 		"""
 		Supervise les liens de tous les commutateurs dans le réseau.
 		"""
-  
+
 		while self.__running:
 			# On attend un certain temps avant de refaire une mesure
 			sleep(measure_interval)
-   
+
 			# On réinitialise les registres des routeurs
 			# Et donc les statistiques associées
 			self.__reset_all_registers()
@@ -282,10 +284,10 @@ class MetaController:
 			# On va ordonner à chaque contrôleur d'envoyer des sondes,
 			# Au préalable, on va lancer le sniffing sur les ports cpu
 			# Pour récupérer les chemins empruntés
-   
+
 			# On lance le sniffing sur les ports cpu
 			# 2 facçons de faire :
-			# - Soit on ordonne à chaque contrôleur de lancer le sniffing 
+			# - Soit on ordonne à chaque contrôleur de lancer le sniffing
 			#		(chaque contrôleur a une méthode et démarre un nouveau thread)
 			# - Soit on le fait ici, et on commute les paquets vers le bon contrôleur
 			# On va choisir la 2eme option
@@ -294,11 +296,11 @@ class MetaController:
 
 			# On envoie donc les sondes
 			self.__coordinate_probes()
-			
+
 			# On attend un peu pour que les sondes soient envoyées
 			# Et que les statistiques soient collectées
 			sleep(5)
-   
+
 			self.__stop_sniffing_on_cpu_ports()
 
 			# On détecte les anomalies
@@ -326,7 +328,7 @@ class MetaController:
 		self.__stop_sniffing_on_cpu_ports()
 		self.__supervisor_T.join(timeout=10)
 		self.__supervisor_T = None
-  
+
 
 
 if __name__ == "__main__":

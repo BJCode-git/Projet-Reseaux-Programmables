@@ -34,6 +34,8 @@ jobs:
     # Étape 5 : Installer les dépendances P4Utils
     - name: Install the p4Utils dependency from github with curl and bash
       run: |
+        sudo apt-get install -y thrift-compiler
+        sudo apt-get install -y libthrift-dev
         curl -sSL https://raw.githubusercontent.com/nsg-ethz/p4-utils/master/install-tools/install-p4-dev.sh | bash
     # Étape 6 : Lancer le linter pylint
     - name: Analysing the code with pylint

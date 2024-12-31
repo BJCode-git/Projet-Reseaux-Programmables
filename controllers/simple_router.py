@@ -6,7 +6,6 @@ des meilleurs chemins et de l’installation des entrées pertinentes dans les t
 """
 
 import os
-import json
 from collections import defaultdict
 from typing import Any
 
@@ -14,10 +13,10 @@ from typing import Any
 from p4utils.utils.sswitch_thrift_API import SimpleSwitchThriftAPI
 from p4utils.utils.compiler import P4C
 from p4utils.utils.helper import load_topo
-from p4utils.utils.topology import Topology, NetworkGraph
+from p4utils.utils.topology import NetworkGraph #, Topology
 
 ## Import des modules de communication ##
-from scapy.all import Ether, IP, sendp , Packet, raw, BitField, FieldListField, sniff
+from scapy.all import Ether, IP, sendp , Packet, BitField, FieldListField, sniff
 from ipaddress import IPv4Address
 
 # Import pour les threads
@@ -132,7 +131,7 @@ class SimpleRouter:
 			self.__topology: NetworkGraph		= topology
 
 		# Interface pour contrôler les équipements P4
-		self.__controller						= SimpleSwitchThriftAPI(self.topology.get_thrift_port(name))
+		self.__controller						= SimpleSwitchThriftAPI(self.__topology.get_thrift_port(name))
 		# Table de routage
 		self.__routing_table:defaultdict[list]	= defaultdict(list)
 		## Supervision des liens et des chemins ##
@@ -394,17 +393,21 @@ class SimpleRouter:
 		"""
 		Réinitialise tous les registres du contrôleur.
 		"""
-		self.__controller.reset_registers()
 
 		# On met à jour les valeurs des registres
 		self.__loss_rate					= 0
 		self.__total_packets_lost			= 0
 		self.__total_probe_packets_sent		= 0
 		self.__total_probe_packets_returned	= 0
+		self.__links_up						= []
   
 		# On remet les valeurs des registres à 0
-		self.__overwrite_all_registers()
-  
+		self.__controller.register_reset("loss_rate")
+		self.__controller.register_reset("total_packets_lost")
+		self.__controller.register_reset("total_probe_packets_sent")
+		self.__controller.register_reset("total_probe_packets_returned")
+		self.__controller.register_reset("links_up")
+
 		self.__logger.debug("Registres réinitialisés avec succès.")
 
 	def get_register_arrays(self):
@@ -421,6 +424,8 @@ class SimpleRouter:
 		self.write_register("total_packets_lost", 0, self.__total_packets_lost)
 		self.write_register("total_probe_packets_sent", 0, self.__total_probe_packets_sent)
 		self.write_register("total_probe_packets_returned", 0, self.__total_probe_packets_returned)
+		self.write_register("links_up", self.__links_up,[0,len(self.__links_up)])
+		self
 		self.__logger.debug("Registres écrits avec succès.")
 
 	def __update_all_registers(self):
@@ -441,14 +446,14 @@ class SimpleRouter:
 
 	##### Méthodes pour gérer les tables #####
 
-	def install_entry(self,table_name:str, entry ):
+	def install_entry(self,table_name:str, action_name :str,match_keys : list,action_params :list = []):
 		"""
 		_param table_name : str : Nom de la table.
 		_param entry : Any : Entrée à installer.
 
 		Installe une entrée dans une table.
 		"""
-		self.__controller.table_add(table_name, entry)
+		self.__controller.table_add(table_name, action_name,match_keys,action_params)
 
 	def remove_entry(self,table_name:str, entry ):
 		"""

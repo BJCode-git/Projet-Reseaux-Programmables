@@ -1,0 +1,35 @@
+name: Compile LaTeX Report
+
+on:
+  push:
+    paths:
+      - 'rapport/**'  # Déclenche la compilation si des fichiers dans le dossier "rapport" changent
+  workflow_dispatch:  # Permet de déclencher manuellement le workflow
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Étape 1 : Vérification du code source
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Étape 2 : Installer TeX Live
+      - name: Install TeX Live
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y texlive-full
+
+      # Étape 3 : Compilation du fichier LaTeX
+      - name: Compile LaTeX
+        working-directory: ./rapport
+        run: |
+            xelatex -f --shell-escape -interaction=nonstopmode -output-directory=build Rapport-BRELOT-Julien.tex
+
+      # Étape 4 : Sauvegarder l'artifact (PDF généré)
+      - name: Upload PDF
+        uses: actions/upload-artifact@v3
+        with:
+          name: Rapport
+          path: ./rapport/Rapport-BRELOT-Julien.pdf
