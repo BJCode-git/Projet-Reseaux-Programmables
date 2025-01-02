@@ -118,8 +118,8 @@ class SimpleRouter:
 
 
 		# Compilation du code P4
-		src = P4C(p4src,"usr/local/bin/p4c")
-		src.compile()
+		#src = P4C(p4src,"usr/local/bin/p4c")
+		#src.compile()
 
 		# Identifiant du switch
 		self.__name: str						= name

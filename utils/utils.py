@@ -10,10 +10,16 @@ from networkx.algorithms.planarity import is_planar
 from matplotlib.pyplot import show, close
 
 from p4utils.mininetlib.network_API import NetworkAPI
-from p4utils.utils.topology import Topology, NetworkGraph
+#from p4utils.utils.topology import NetworkGraph
 
 from random import choice, seed as random_seed , randint
-from logging import Logger,getLogger, info, INFO , basicConfig
+from logging import Logger,getLogger, INFO, basicConfig , debug, info
+
+# For saving the topology to a JSON file
+from networkx.readwrite.json_graph import node_link_data
+from p4utils.utils.helper import _prefixLenMatchRegex
+import json
+from ipaddress import ip_interface, IPv4Network
 
 seed = 1234
 
@@ -39,7 +45,7 @@ def generate_regular_graph(n_switch:int, n_host:int, degree:int) -> Graph:
 		raise ValueError("Le produit n_switch * degree doit être pair.")
 
 
-	G = random_regular_graph(degree, n_switch, seed=seed)
+	G : Graph = random_regular_graph(degree, n_switch, seed=seed)
 
  	# Modifie le nom des noeuds
 	random_seed(seed)
@@ -51,8 +57,8 @@ def generate_regular_graph(n_switch:int, n_host:int, degree:int) -> Graph:
 	node_mapping = {}
 	for node in G:
 		type = 'n'
-		# Définit une chance de 1/4 d'avoir un routeur loss ou dumb
-		if randint(1,4) == 4:
+		# Définit une chance de 1/5 d'avoir un routeur loss ou dumb
+		if randint(1,5) == 1:
 			# On choisit un type de routeur défectueux
 			type = choice(types)
 		node_mapping[node] = f"s{type}{node}"
@@ -85,7 +91,7 @@ def generate_regular_graph(n_switch:int, n_host:int, degree:int) -> Graph:
 		sw = choice(list(switch_choices))
 
 		# On connecte l'hôte au switch
-		G.add_edge(f"h{i}", sw)
+		G.add_edge(f"h{i}", sw, weight=1)
 
 		# On retire le switch de la liste des switchs disponibles
 		switch_choices.remove(sw)
@@ -134,6 +140,112 @@ def draw_graph(graph):
 	close()
 
 
+def save_topology(net: NetworkAPI, filename: str):
+	"""Saves mininet topology to a JSON file.
+
+	Warning:
+		:py:class:`networkx.classes.multigraph.MultiGraph` graphs are not 
+		supported yet by :py:class:`~p4utils.utils.topology.NetworkGraph`.
+	"""
+	# This function return None for each not serializable
+	# obect so that no TypeError is thrown.
+	def default(obj):
+		return None
+
+	
+	info('Saving mininet topology to database: {}\n'.format(net.topoFile))
+
+	# Check whether the graph is a multigraph or not
+	multigraph = net.is_multigraph()
+
+	if multigraph:
+		info('Multigraph topology not supported yet.\n')
+	else:
+		info('Simple graph topology selected.\n')
+		graph = net.g.convertTo(Graph, data=True, keys=False)
+
+		for _, _, params in graph.edges(data=True):
+
+			node1 = params['node1']
+			node2 = params['node2']
+			edge = graph[node1][node2]
+			params1 = edge.pop('params1', {})
+			params2 = edge.pop('params2', {})
+
+			# Save controller cpu interfaces in nodes.
+			if node1 == 'sw-cpu' and node2 != 'sw-cpu':
+				if graph.nodes[node2]['cpu_port']:
+					graph.nodes[node2]['cpu_port_num'] = edge['port2']
+					graph.nodes[node2]['cpu_intf'] = edge['intfName2']
+					graph.nodes[node2]['cpu_ctl_intf'] = edge['intfName1']
+				else:
+					raise Exception(
+						'inconsistent cpu port for node {}.'.format(node2))
+			elif node2 == 'sw-cpu' and node1 != 'sw-cpu':
+				if graph.nodes[node1]['cpu_port']:
+					graph.nodes[node1]['cpu_port_num'] = edge['port1']
+					graph.nodes[node1]['cpu_intf'] = edge['intfName1']
+					graph.nodes[node1]['cpu_ctl_intf'] = edge['intfName2']
+				else:
+					raise Exception(
+						'inconsistent cpu port for node {}.'.format(node1))
+
+			# Move outside parameters in subdictionaries
+			# and append number to identify them.
+			for key in params1.keys():
+				edge[key+'1'] = params1[key]
+
+			for key in params2.keys():
+				edge[key+'2'] = params2[key]
+
+			# Fake switches' IPs
+			if 'sw_ip1' in edge.keys():
+				edge['ip1'] = edge['sw_ip1']
+				del edge['sw_ip1']
+
+			if 'sw_ip2' in edge.keys():
+				edge['ip2'] = edge['sw_ip2']
+				del edge['sw_ip2']
+				
+			# Get addresses from the network
+			# This gathers also routers interfaces IPs!
+			# virtual switch ips start with 20.x.x.x for the sake of it
+			# we will consider those Ips as reserved and not update them
+			# we need to check if they are P4 switches and not remove the IP.
+			port1 = edge['port1']
+			info('Updating address for node {} port {}.\n'.format(node1, port1))
+			print(net.net)
+			intf1 = net.net[node1].intfs[port1]
+			ip1, addr1 = intf1.updateAddr()
+			#import ipdb; ipdb.set_trace()
+			if ip1 is not None:
+				subnet1 = _prefixLenMatchRegex.findall(intf1.ifconfig())[0]
+				ip1 = ip_interface(ip1+'/'+subnet1).with_prefixlen
+				# possible bug: I moved this here so switches do not lose the virtual ip
+				edge.update(ip1=ip1, addr1=addr1)
+
+			port2 = edge['port2']
+			intf2 = net.net[node2].intfs[port2]
+			ip2, addr2 = intf2.updateAddr()
+			#import ipdb; ipdb.set_trace()
+			if ip2 is not None:
+				subnet2 = _prefixLenMatchRegex.findall(intf2.ifconfig())[0]
+				ip2 = ip_interface(ip2+'/'+subnet2).with_prefixlen
+				# possible bug: I moved this here so switches do not lose the virtual ip
+				edge.update(ip2=ip2, addr2=addr2)
+
+		# Remove sw-cpu if present
+		if 'sw-cpu' in graph:
+			graph.remove_node('sw-cpu')
+
+	graph_dict = node_link_data(graph)
+	# save topology locally
+	with open(net.topoFile, 'w') as f:
+		json.dump(graph_dict, f, default=default)
+	# save a global copy in tmp
+	with open('/tmp/topology.json', 'w') as f:
+		json.dump(graph_dict, f, default=default)
+
 # Génère une topologie aléatoire 
 def generate_network(n_switch:int, n_host:int, degree:int) -> NetworkAPI :
 	"""
@@ -154,6 +266,7 @@ def generate_network(n_switch:int, n_host:int, degree:int) -> NetworkAPI :
 	draw_graph(G)
  
 	net = NetworkAPI()
+	net.setLogLevel("debug")
 	
 	# Ajoute les switchs / hôtes
 	for node in G.nodes:
@@ -167,22 +280,83 @@ def generate_network(n_switch:int, n_host:int, degree:int) -> NetworkAPI :
 					net.addP4Switch(node,type='simple_router')
 		elif node[0] == 'h':
 			net.addHost(node)
-
-	# Ajout des liens
-	for edge in G.edges:
-		net.addLink(edge[0],edge[1],weight=G[edge[0]][edge[1]]['weight'])
-
-
-	net.setP4SourceAll('p4src/simple_router.p4')
  
+	
+
+	# Ajoute les liens
+	for edge in G.edges.data("weight", default=1):
+		if edge[0] in net.nodes() and edge[1] in net.nodes():
+			print(f"Adding link: {edge[0]} <-> {edge[1]} with weight {edge[2]}")
+			try:
+				net.addLink(edge[0], edge[1], weight=edge[2])
+			except Exception as e:
+				print(f"Error while adding link: {e}")
+			except:
+				print(f"Error while adding link.")
+		else:
+			print(f"Skipping invalid link: {edge[0]} <-> {edge[1]}")
+
+  
+	# Ajout des pertes pour les routeurs de type loss
+	#for edge in net.links():
+	#	if net.getNode(edge[0])['type'] == 'simple_router_loss':
+	#		net.setLoss(edge[0],edge[1],0.3)
+
+	
+	
+	
 	# Assignation des adresses IP
 	net.l3()
- 
+	
+	net.setP4SourceAll('p4src/simple_router.p4')
+	net.compile()
 	net.enablePcapDumpAll()
 	net.enableLogAll()
 	net.enableCli()
 	net.enableCpuPortAll()
-	net.startNetwork() 
-	net.save_topology("topology.json")
+	# Assignation automatique des adresses IP
+	net.auto_assignment()
 	
+
+
+	print("Is multigraph ? : ", net.is_multigraph())
+ 
+	print("Nodes:")
+	for n in net.nodes():
+		if(net.isP4Switch(n)):
+			match net.getNode(n)['type']:
+				case 'simple_router_loss':
+					print(f"{n} (Loss router)")
+				case 'simple_router_stupid':
+					print(f"{n} (Dumb router)")
+				case _:
+					print(f"{n} (Normal router)")
+		else:
+			print(f"{n}")
+	
+	print("Liens:")
+	for arcs in net.links():
+		print(f"{arcs[0]} -> {arcs[1]}")
+ 
+	# Affiche les ports et interfaces
+	print("Ports:")
+	for n,ports in net.node_ports().items():
+		print(f" {n} :")
+		for port in ports:
+			print(f"  {port} : {ports[port]} ")
+  
+	print("Interfaces:")
+	for n,intfs in net.node_intfs().items():
+		print(f" {n} :")
+		for intf in intfs:
+			print(f"  {intf} : {intfs[intf]} ")
+  
+	print("Topologie générée. !!!")
+
+	draw_graph(G)
+ 
+	net.startNetwork()
+	# Sauvegarde la topologie
+	save_topology(net, "topology.json")
+
 	return net

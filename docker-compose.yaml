@@ -1,0 +1,16 @@
+services:
+
+  pokemon:
+    container_name: pokemon
+    #image: registry.app.unistra.fr/jr.luttringer/reseaux-programmables-conteneur/p4-utils
+    build: .
+    volumes:
+      - .:/home
+    working_dir: /home
+    #stdin_open: true   # Maintient le stdin ouvert pour une interaction
+    #tty: true 
+
+networks:
+  default:
+    driver: bridge
+

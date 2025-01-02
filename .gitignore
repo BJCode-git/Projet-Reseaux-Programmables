@@ -1,3 +1,5 @@
 rapport/build/*
-rapport/compile-rapport.sh
+rapport/compile-rapport.
+rapport/compiled
+rapport/compiled/*
 .vscode
