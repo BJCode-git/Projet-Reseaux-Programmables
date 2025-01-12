@@ -2,4 +2,8 @@ rapport/build/*
 rapport/compile-rapport.
 rapport/compiled
 rapport/compiled/*
+__pycache__
+__pycache__/*
+*.pyc
+*.pyo
 .vscode

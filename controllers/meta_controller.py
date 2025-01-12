@@ -11,11 +11,11 @@ from p4utils.utils.helper import load_topo
 from p4utils.utils.topology import NetworkGraph # , Topology
 
 # Import des contrôleurs
-from controllers.simple_router import SimpleRouter
-from controllers.simple_router_loss import SimpleRouterLoss
-from controllers.simple_router_stupid import SimpleRouterStupid
+from simple_router import SimpleRouter
+from simple_router_loss import SimpleRouterLoss
+from simple_router_stupid import SimpleRouterStupid
 #Import de la structure pour les statistiques
-from controllers.simple_router import Stats
+from simple_router import Stats
 
 
 
@@ -52,10 +52,11 @@ class MetaController:
 		"""
 		Initialise les contrôleurs et leurs registres pour chaque switch de la topologie.
 		"""
+		types  = self.__topology.get_p4switches(fields="type")
 		for p4switch in self.__topology.get_p4switches():
 
 			# On regarde si le switch est un routeur simple à l'attribut "type"
-			switch_type = p4switch.get("type", "simple_router")
+			switch_type = types[p4switch]
 			match switch_type:
 				case "simple_router_loss":
 					self.__controllers[p4switch]	= SimpleRouterLoss(p4switch, self.__topology)

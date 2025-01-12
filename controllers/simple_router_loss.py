@@ -7,9 +7,8 @@ from p4utils.utils.sswitch_thrift_API import SimpleSwitchThriftAPI
 from p4utils.mininetlib.network_API import NetworkAPI
 from p4utils.utils.compiler import P4C
 from p4utils.utils.helper import load_topo
-from p4utils.utils.topology import Topology
 
-from controllers.simple_router import SimpleRouter
+from simple_router import SimpleRouter
 
 from logging import getLogger, INFO, ERROR, WARNING, DEBUG, StreamHandler, Formatter
 

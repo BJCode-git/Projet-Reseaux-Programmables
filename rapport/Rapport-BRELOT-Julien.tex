@@ -220,7 +220,7 @@
     % Auteur et affiliation
     \begin{center}
         {\LARGE Brelot Julien\par}
-        {\Large \textit{ \href{URL}{Git} \par}}
+        {\Large \textit{ \href{https://github.com/BJCode-git/Projet-Reseaux-Programmables}{Git} \par}}
     \end{center}
 
     \vspace{1.5cm} % Adds space between author info and logos
@@ -271,69 +271,311 @@
     \begin{card}
         On retrouve dans ce mini-projet : 
         \begin{itemize}
-            \item Un rfichier P4 pour le data plane des 3 types de routeurs.
+            \item Un fichier P4 pour le data plane des 3 types de routeurs.
             \item Un méta-contrôleur qui permet de contrôler les routeurs et de collecter les informations de supervision.
             \item 3 types de controle plane définis en python pour les routeurs : simple_router, simple_router_loss et simple_router_stupid.
             \item Un fichier python network.py qui permet de générer et lancer un réseau.
         \end{itemize}
     \end{card}
 
-    \subsection{Fonctionnement}
-        \subsubsection{Data Plane}
+    \subsection{Data Plane}
+
+        Le \textbf{plan de données} est implémenté en P4 et se charge de la gestion des paquets circulant à travers les commutateurs. 
+        Voici un résumé de son fonctionnement en relation avec les objectifs du projet POKEMON :
+
+        \begin{card}[1. Routage intra-domaine]
+            \begin{itemize}[left=0pt]
+                \item Chaque commutateur (équipement \texttt{simple\_router}) effectue un routage IP classique en utilisant des tables pour déterminer les meilleurs chemins.
+                \item Le plan de contrôle installe les entrées nécessaires dans les tables du plan de données pour permettre ce routage.
+            \end{itemize}
+        De ce fait, il n'est pas nécessaire d'avoir un plan de données spécifique pour chaque type de routeur. \\
+        Il suffit, pour le plan de contrôle des routeurs simple\_router\_stupid, de calculer des chemins non nécessairement optimaux et de transmettre les next hops au plan de données. \\
+        Pour simuler le comportement de perte de paquets, on aurait pu utiliser la fonction de l'API net de P4 pour simuler des pertes de paquets. \\
+        Néanmoins, j'ai choisi d'utiliser une perte de paquets aléatoire via le plan de données afin d'affecter seulement les paquets de données et non les paquets de sondes. \\
+        Le plan de contrôle indique simplement au plan de données la taux de perte de paquets via le registre \texttt{loss\_rate}.
+        \end{card}
+
+        \begin{card}[2. Encapsulation pour points de passage intermédiaires]
+            \begin{itemize}[left=0pt]
+                \item Le plan de données inclut une fonctionnalité d'encapsulation qui force les paquets à suivre des chemins spécifiques définis par des points de passage (nœuds ou liens).
+                \item Cela est accompli via un en-tête dédié où les points de passage sont empilés dans l'ordre de passage.
+                \item Cette encapsulation impose des points de passages qui peuvent donc être des noeuds non adjacents.
+                \item Les points de passage sont indiqués via leur adresse IP.
+                \item Le paquet est routé vers le prochain point de passage en utilisant le routage standard.
+                \item Une fois que tous les points de passage ont été atteints, le paquet est désencapsulé et routé vers sa destination finale.
+            \end{itemize}
+        \end{card}
+
+        \begin{card}[3. Gestion des anomalies des équipements]
+            \begin{itemize}[left=0pt]
+                \item Deux variantes du \texttt{simple\_router} sont introduites :
+                \begin{itemize}[left=15pt]
+                    \item \texttt{simple\_router\_loss} : a une probabilité de 30\% (configurable) de perte de paquets.
+                    \item Cette perte est modifiable en via le registre \texttt{loss\_rate} et via le contrôleur simple
+                    \item \texttt{simple\_router\_stupid} : utilise des chemins aléatoires au lieu des meilleurs chemins.
+                    \item Le plan de données est le même pour les 3 types de routeurs, seul le plan de contrôle change.
+                \end{itemize}
+            \end{itemize}
+        \end{card}
+
+        \begin{card}[4. Supervision des liens]
+            \begin{itemize}[left=0pt]
+                \item A la réception d'un message de débût de contrôle, le routeur broadcast un message de sondes sur tous ses liens.
+                \item Le message de sonde indique dans l'en-tête, un numéro de protocole IP spécifique pour les sondes de liens.
+                \item A la réception d'une sonde, par un voisin, le voisin renvoie la sonde avec un numéro de protocole différent indiquant un retour par le même lien.
+                \item Le routeur reçoit les sondes de retour, incrémente un registre de sondes reçues et enregistre les ports de réception dans un registre.
+                \item Le plan de contrôle peut alors récupérer ces informations pour déterminer les liens actifs et les pertes de paquets.
+            \end{itemize}
+        \end{card}
+
+        \begin{card}[5. Supervision des chemins]
+            Sur un principe analogue à la supervision des liens, 
+            le plan de contrôle peut envoyer des sondes de chemins pour vérifier la conformité des chemins empruntés par les paquets.
+            Il envoie dans l'en-tête en numéro de protocole ipv4 spécifique pour les sondes de chemins.
+            \begin{itemize}[left=0pt]
+                \item A la réception d'une sonde de supervision de chemin, le routeur encapsule son IP dans une en-tête personnalisée de méta données.
+                \item Il route ensuite le paquet vers le next hop selon la destination du paquet.
+                \item Il modifie finalement le protocole IP du paquet pour indiquer une sonde de supervision aller.
+                \item Chaque point de passage encapsule de même son IP et route le paquet vers le prochain point de passage.
+                \item Une fois atteint la destination, et renvoyé vers l'expéditeur. Et on indique un protocole différent pour le retour.
+                \item Lors d'un retour, les routeurs n'encapasulent pas leur IP et route directement le paquet vers le routeur d'origine.
+                \item À la réception, le routeur renvoie le paquet vers le plan de contrôle qui analysera le paquet et les points de passage pour déterminer la conformité du chemin.
+            \end{itemize}
+        \end{card}
+
+        \begin{card}[6. Réaction aux anomalies]
+        \begin{itemize}[left=0pt]
+            \item En cas d'anomalie (pertes élevées, chemins non conformes), le méta-contrôleur modifie les poids IGP des liens pour contourner les équipements défaillants.
+            \item Ces modifications entrainent un nouveau calcul des chemins par les contrôleurs et une réinstallation des entrées dans les tables du plan de données.
+            \item Les routeurs continuent de fonctionner normalement, mais avec des chemins modifiés.
+            \item De cette façon, on limite l'impact des équipements défaillants sur le réseau et l'interrupion des services.
+            \item Cette réaction incombe donc au méta-contrôleur et aux contrôleurs et reste transparente pour les routeurs.
+        \end{itemize}
+        \end{card}
 
 
+        \begin{card}[Points Clefs du Data Plane]
+        Le plan de données agit comme un moteur exécutant les politiques définies par le plan de contrôle. Il se concentre sur :
+        \begin{itemize}[left=0pt]
+            \item La gestion des paquets de routage standard et des sondes.
+            \item La surveillance des liens et des chemins.
+            \item La réaction rapide aux instructions du méta-contrôleur pour garantir un fonctionnement réseau optimal, même en présence d'équipements défaillants.
+        \end{itemize}
+        \end{card}
 
-\section{Conclusion}
+    \subsection{Control Plane}
 
-    \begin{card}
-        Cette étude met en évidence les avantages et inconvénients des architectures NoSQL et relationnelles dans divers scénarios. \\
-        MongoDB offre une grande flexibilité et scalabilité, totefois, la réplication et le sharding peuvent impacter les performances des opérations CRUD. \\
-        Néanmoins, le sharding, s'il est possible est une très bonne solution. \\
-        Avec une meilleure configuration, on pourrait s'attendre à des performances similaire au mode standalone et on a tout de même obtenu des meilleures performances que dans le mode répliqué. \\
-        Toutefois MySQL, reste performant pour des cas nécessitant des transactions complexes et ne peut montrer l'étendue de ses performances dans un cas aussi simple ne nécessitant pas de modèle relationnel. \\
-        De plus, les performances du cluster MySQL s'est avéré, contre toute attente, plus performant que MySQL Standalone, et aussi performante que MongoDB Standalone. \\
+        \subsubsection{Méta-contrôleur}
+
+        \begin{card}[1.Rôle du méta-contrôleur]
+            Le méta-contrôleur coordonne les actions des contrôleurs locaux associés à chaque switch du réseau, gère la supervision et l'optimisation des liens du réseau. Il intervient principalement pour :
+            \begin{itemize}[left=0pt]
+                \item Superviser les liens actifs du réseau.
+                \item Diagnostiquer et réagir aux anomalies de routage et de pertes de paquets.
+                \item Envoyer des sondes pour surveiller l'état des chemins.
+            \end{itemize}
+        \end{card}
+
+        \begin{card}[2. Rôle du méta-contrôleur]
+            Le méta-contrôleur coordonne les actions des contrôleurs locaux associés à chaque switch du réseau, gère la supervision et l'optimisation des liens du réseau. Il intervient principalement pour :
+            \begin{itemize}
+                \item Superviser les liens actifs du réseau.
+                \item Diagnostiquer et réagir aux anomalies de routage et de pertes de paquets.
+                \item Envoyer des sondes pour surveiller l'état des chemins.
+            \end{itemize}
+        \end{card}
+
+        \begin{card}[3. Fonctionnement principal]
+            Le m\'eta-contr\^oleur effectue les t\^aches suivantes :
+            \begin{card}[a) Supervision p\'eriodique]
+            \begin{enumerate}
+                \item \textbf{R\'einitialisation des registres} : Effacement des donn\'ees collect\'ees pr\'ec\'edemment.
+                \item \textbf{Envoi de sondes} :
+                      \begin{itemize}
+                          \item Les contr\^oleurs locaux envoient des paquets de sonde pour mesurer la qualit\'e des chemins.
+                          \item Les ports CPU des switches capturent et analysent ces paquets.
+                      \end{itemize}
+                \item \textbf{Sniffing des paquets} : Analyse des paquets re\c cus pour collecter des statistiques et d\'etecter des anomalies.
+            \end{enumerate}
+            \end{card}
+            
+            \begin{card}[b) Collecte et analyse des anomalies]
+            \begin{itemize}
+                \item \textbf{Statistiques collect\'ees} :
+                      \begin{itemize}
+                          \item Taux de pertes par port.
+                          \item Chemins emprunt\'es versus chemins optimaux.
+                      \end{itemize}
+                \item \textbf{D\'etection d'anomalies} :
+                      \begin{itemize}
+                          \item Ports ou liens inactifs.
+                          \item Utilisation de chemins sous-optimaux.
+                      \end{itemize}
+            \end{itemize}
+            \end{card}
+            
+            \begin{card}[c) R\'eactions aux anomalies]
+            \begin{enumerate}
+                \item \textbf{Suppression de liens d\'efectueux} : Les liens associ\'es aux ports inactifs sont d\'esactiv\'es.
+                \item \textbf{R\'eajustement des poids} : Augmentation des poids des chemins sous-optimaux pour p\'enaliser leur utilisation.
+            \end{enumerate}
+            \end{card}
+            \end{card}
+            
+            \begin{card}[4. Gestion des registres et des tables]
+            Le m\'eta-contr\^oleur offre des m\'ethodes pour :
+            \begin{itemize}
+                \item Lire ou \'ecrire dans les registres des switches.
+                \item Ajouter ou supprimer des entr\'ees dans les tables de routage.
+            \end{itemize}
+            \end{card}
+            
+            \begin{card}[5. Diagnostic des anomalies]
+            Les contr\^oleurs locaux disposent de m\'ethodes pour :
+            \begin{itemize}
+                \item Identifier les liens d\'efectueux.
+                \item Comparer les chemins optimaux et r\'eels.
+                \item G\'en\'erer des alertes ou ajuster la topologie.
+            \end{itemize}
+            \end{card}
+            
+            \begin{card}[6. Architecture modulaire]
+            Le m\'eta-contr\^oleur centralise la supervision tout en d\'el\'eguant les t\^aches aux contr\^oleurs locaux pour assurer la scalabilit\'e.
+            \end{card}
+
+        \subsubsection{Contrôleurs}
+
+        Le contrôleur standard assure le fonctionnement d'un routeur simple, capable de gérer les tâches essentielles comme le routage des paquets, la supervision des liens et la détection des anomalies réseau. 
+        Il repose sur un \textbf{plan de données P4} et un \textbf{plan de contrôle Python}.
+
+        \begin{card}[1. Initialisation]
+        \begin{itemize}
+            \item \textbf{Compilation du fichier P4} : Compile les définitions des tables et actions pour le plan de données.
+            \item \textbf{Chargement de la topologie réseau} : Initialise un graphe réseau basé sur un fichier JSON ou une structure \texttt{NetworkGraph}.
+            \item \textbf{Configuration des registres} : Les registres comme \texttt{loss\_rate}, \texttt{total\_packets\_lost}, etc., sont initialisés à zéro.
+            \item \textbf{Déploiement initial} :
+            \begin{itemize}
+                \item Calcul des routes.
+                \item Installation des règles de routage (\texttt{ipv4\_lpm}) et d'informations du routeur (\texttt{router\_info}).
+                \item Configuration des règles de multicast pour les sondes.
+            \end{itemize}
+        \end{itemize}
+        \end{card}
+
+        \begin{card}[2. Routage]
+        \begin{itemize}
+            \item \textbf{Calcul des chemins optimaux} : Utilise les algorithmes de plus court chemin pour déterminer les routes entre les nœuds du réseau.
+            \item \textbf{Installation des règles} :
+            \begin{itemize}
+                \item Les règles associent une adresse IP de destination, un port de sortie, une adresse MAC et éventuellement une adresse IP source.
+                \item Les hôtes reçoivent des règles spécifiques en fonction de leur IP.
+            \end{itemize}
+            \item \textbf{Mise à jour des tables} : Les règles obsolètes ou incorrectes peuvent être supprimées ou réinstallées.
+        \end{itemize}
+        \end{card}
+
+        \begin{card}[3. Supervision]
+        \begin{itemize}
+            \item \textbf{Envoi de sondes} :
+            \begin{itemize}
+                \item Les sondes de test des liens (\texttt{PROTOCOL\_LINK\_TEST\_TRIGGER}) sont diffusées sur tous les ports.
+                \item Les sondes de test des chemins (\texttt{PROTOCOL\_PATH\_TEST\_TRIGGER}) sont envoyées vers des destinations spécifiques.
+            \end{itemize}
+            \item \textbf{Capture des réponses des sondes} :
+            \begin{itemize}
+                \item Le contrôleur écoute les paquets reçus sur le port CPU.
+                \item Les informations des chemins empruntés sont extraites des paquets et comparées aux chemins optimaux.
+            \end{itemize}
+        \end{itemize}
+        \end{card}
+
+        \begin{card}[4. Diagnostic]
+        \begin{itemize}
+            \item \textbf{Anomalies sur les liens} :
+            \begin{itemize}
+                \item Vérifie les ports fonctionnels en comparant les registres \texttt{links\_up} avec la configuration attendue.
+                \item Identifie les ports inactifs (liens down).
+            \end{itemize}
+            \item \textbf{Anomalies sur les chemins} :
+            \begin{itemize}
+                \item Compare les chemins optimaux avec ceux réellement empruntés par les sondes.
+                \item Rapporte les écarts, notamment les chemins non optimaux.
+            \end{itemize}
+            \item \textbf{Rapports statistiques} :
+            \begin{itemize}
+                \item Génère des rapports détaillés incluant les ports inactifs, les chemins incorrects, le taux de perte de paquets, et les statistiques de sondes.
+            \end{itemize}
+        \end{itemize}
+        \end{card}
+
+        \begin{card}[5. Réinitialisation]
+        \begin{itemize}
+            \item \textbf{Réinitialisation complète} : Les tables et registres peuvent être nettoyés et réinitialisés en cas de redémarrage ou de mise à jour de la topologie.
+        \end{itemize}
+        \end{card}
+        
+        \begin{card}[Contrôleurs spécifiques]
+        Les contrôleurs \texttt{simple\_router\_loss} et \texttt{simple\_router\_stupid} sont des variantes du contrôleur standard qui ajoutent des fonctionnalités de perte de paquets et de routage non optimal. \\
+        Le contrôleur \texttt{simple\_router\_loss} simule une perte de paquets aléatoire en modifiant simplement le taux de perte dans le registre \texttt{loss\_rate}. \\
+        Le contrôleur \texttt{simple\_router\_stupid} utilise des chemins aléatoires au lieu des chemins optimaux pour simuler un comportement non optimal. \\
+        Il modifie donc simplement la méthode de calcul des chemins optimaux pour choisir des chemins aléatoires. \\
+        Ainsi, la plupart des fonctionnalités du contrôleur standard sont conservées, seul le calcul des chemins ou le taux de perte est modifié.
+        \end{card}
+
+        \begin{card}[Points clés du contrôleur]
+        \begin{itemize}
+            \item \textbf{Contrôle basé sur des règles dynamiques} : Les tables \texttt{ipv4\_lpm} et \texttt{router\_info} sont utilisées pour définir les comportements de routage et la gestion des informations des routeurs.
+            \item \textbf{Récupération et mise à jour des registres} : Les registres stockent des données essentielles comme le taux de perte ou l'état des liens, permettant un diagnostic précis.
+            \item \textbf{Gestion parallèle} : Des threads distincts assurent la capture des paquets sur le port CPU et la supervision en temps réel.
+        \end{itemize}
+        \end{card}
+
+    \begin{card}[Points clés du contrôle plane]
+        Comme demandé, le \textbf{plan de contrôle} est implémenté en Python et se charge de la gestion des équipements et de la collecte des informations de supervision. \\
+        ela passe d'abord par un méta-contrôleur qui gère l'ensemble du réseau et des contrôleurs qui gèrent les routeurs individuellement. \\
+        e méta contrôleur initie chaque contrôleur selon la topologie du réseau, initie à une fréquence régulière, une vérification des liens puis des chemins. \\
+        l peut aussi réagir aux anomalies en modifiant les poids IGP des liens pour contourner les équipements défaillants. \\
+        es contrôleurs, quant à eux, gèrent les routeurs individuellement en leur envoyant des instructions pour la collecte des informations de supervision. \\
+        ls analysent ensuite ces informations pour déterminer les liens actifs, les pertes de paquets et la conformité des chemins et remonte cela au méta-contrôleur. \\
+        e méta contrôleur peut alors réagir en conséquence pour garantir un fonctionnement optimal du réseau.
+        e dernier transmet alors la nouvelle topologie aux contrôleurs qui réinstallent les entrées dans les tables du plan de données après la modification des poids IGP.
     \end{card}
+
+%\section{Conclusion}
+
+    %\begin{card}
+    %\end{card}
 
 % On crée une partie appendice pour les annexes ou il y a des informations complémentaires, sur le déploiement du code
 
-\appendix
-\section{Annexe}
-\subsection{Déploiement du Code}
+\newpage
+
+\subsection{Déploiement du projet}
 
 
 Le projet peut être cloné depuis le dépôt git suivant : 
 \begin{card}
     \begin{minted}{bash}
-    git clone https://github.com/BJCode-git/Projet-TDLE.git -b main &&
-    cd Projet-TDLE
+    git clone https://github.com/BJCode-git/Projet-Reseaux-Programmables -b main &&
+    cd Projet-Reseaux-Programmables
 \end{minted}
 \end{card}
 
 
-
-\emph{Installation des dépendances python :}
+\emph{Lancement du conteneur P4 :}
 
 \begin{card}
 \begin{minted}{bash}
-    pip3 install -r requirements.txt
+    docker compose run pokemon
 \end{minted}
 \end{card}
 
-\emph{Démarrage du réseau :}
+\emph{Démarrage du réseau  et du méta-contrôleur / contrôleurs:}
 
 \begin{card}
     \begin{minted}{bash}
-    python3 network.py
-\end{minted}
-\end{card}
-
-
-\emph{Démarrage du méta-contrôleur et des \emph{simple router} :}
-
-\begin{card}
-\begin{minted}{bash}
-    python3 controllers/meta_controller.py
-\end{minted}
+    ./start.sh
+    \end{minted}
 \end{card}
 
 

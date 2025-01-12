@@ -13,7 +13,7 @@ from p4utils.mininetlib.network_API import NetworkAPI
 #from p4utils.utils.topology import NetworkGraph
 
 from random import choice, seed as random_seed , randint
-from logging import Logger,getLogger, INFO, basicConfig , debug, info
+from logging import Logger,getLogger, INFO, basicConfig , debug, info, warning
 
 # For saving the topology to a JSON file
 from networkx.readwrite.json_graph import node_link_data
@@ -166,11 +166,11 @@ def save_topology(net: NetworkAPI, filename: str):
 
 		for _, _, params in graph.edges(data=True):
 
-			node1 = params['node1']
-			node2 = params['node2']
-			edge = graph[node1][node2]
-			params1 = edge.pop('params1', {})
-			params2 = edge.pop('params2', {})
+			node1	= params['node1']
+			node2	= params['node2']
+			edge	= graph[node1][node2]
+			params1	= edge.pop('params1', {})
+			params2	= edge.pop('params2', {})
 
 			# Save controller cpu interfaces in nodes.
 			if node1 == 'sw-cpu' and node2 != 'sw-cpu':
@@ -212,38 +212,39 @@ def save_topology(net: NetworkAPI, filename: str):
 			# virtual switch ips start with 20.x.x.x for the sake of it
 			# we will consider those Ips as reserved and not update them
 			# we need to check if they are P4 switches and not remove the IP.
-			port1 = edge['port1']
-			info('Updating address for node {} port {}.\n'.format(node1, port1))
-			print(net.net)
-			intf1 = net.net[node1].intfs[port1]
-			ip1, addr1 = intf1.updateAddr()
-			#import ipdb; ipdb.set_trace()
-			if ip1 is not None:
-				subnet1 = _prefixLenMatchRegex.findall(intf1.ifconfig())[0]
-				ip1 = ip_interface(ip1+'/'+subnet1).with_prefixlen
-				# possible bug: I moved this here so switches do not lose the virtual ip
-				edge.update(ip1=ip1, addr1=addr1)
+			try:
+				port1 = edge['port1']
+				#info('Updating address for node {} port {}.\n'.format(node1, port1))
+				print(net.net)
+				intf1 = net.net[node1].intfs[port1]
+				ip1, addr1 = intf1.updateAddr()
+				#import ipdb; ipdb.set_trace()
+				if ip1 is not None:
+					subnet1 = _prefixLenMatchRegex.findall(intf1.ifconfig())[0]
+					ip1 = ip_interface(ip1+'/'+subnet1).with_prefixlen
+					# possible bug: I moved this here so switches do not lose the virtual ip
+					edge.update(ip1=ip1, addr1=addr1)
 
-			port2 = edge['port2']
-			intf2 = net.net[node2].intfs[port2]
-			ip2, addr2 = intf2.updateAddr()
-			#import ipdb; ipdb.set_trace()
-			if ip2 is not None:
-				subnet2 = _prefixLenMatchRegex.findall(intf2.ifconfig())[0]
-				ip2 = ip_interface(ip2+'/'+subnet2).with_prefixlen
-				# possible bug: I moved this here so switches do not lose the virtual ip
-				edge.update(ip2=ip2, addr2=addr2)
+				port2 = edge['port2']
+				intf2 = net.net[node2].intfs[port2]
+				ip2, addr2 = intf2.updateAddr()
+				#import ipdb; ipdb.set_trace()
+				if ip2 is not None:
+					subnet2 = _prefixLenMatchRegex.findall(intf2.ifconfig())[0]
+					ip2 = ip_interface(ip2+'/'+subnet2).with_prefixlen
+					# possible bug: I moved this here so switches do not lose the virtual ip
+					edge.update(ip2=ip2, addr2=addr2)
+			except Exception as e:
+				warning('save_topology : error updating addresses -> {}\n'.format(e))
 
 		# Remove sw-cpu if present
 		if 'sw-cpu' in graph:
 			graph.remove_node('sw-cpu')
 
 	graph_dict = node_link_data(graph)
+
 	# save topology locally
 	with open(net.topoFile, 'w') as f:
-		json.dump(graph_dict, f, default=default)
-	# save a global copy in tmp
-	with open('/tmp/topology.json', 'w') as f:
 		json.dump(graph_dict, f, default=default)
 
 # Génère une topologie aléatoire 
@@ -266,7 +267,7 @@ def generate_network(n_switch:int, n_host:int, degree:int) -> NetworkAPI :
 	draw_graph(G)
  
 	net = NetworkAPI()
-	net.setLogLevel("debug")
+	net.setLogLevel("info")
 	
 	# Ajoute les switchs / hôtes
 	for node in G.nodes:
@@ -317,7 +318,7 @@ def generate_network(n_switch:int, n_host:int, degree:int) -> NetworkAPI :
 	# Assignation automatique des adresses IP
 	net.auto_assignment()
 	
-
+	
 
 	print("Is multigraph ? : ", net.is_multigraph())
  
@@ -350,13 +351,12 @@ def generate_network(n_switch:int, n_host:int, degree:int) -> NetworkAPI :
 		print(f" {n} :")
 		for intf in intfs:
 			print(f"  {intf} : {intfs[intf]} ")
-  
+
 	print("Topologie générée. !!!")
 
-	draw_graph(G)
- 
-	net.startNetwork()
+
+	#net.startNetwork()
 	# Sauvegarde la topologie
-	save_topology(net, "topology.json")
+	#save_topology(net, "topology.json")
 
 	return net
